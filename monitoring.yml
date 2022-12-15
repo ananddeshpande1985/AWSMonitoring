@@ -1,0 +1,2238 @@
+---
+Description: Monitoring resources for AWS Managed Services
+AWSTemplateFormatVersion: '2010-09-09'
+Metadata:
+  MON:
+    CommitId: af07456c49025833356e4d7adcf5d98467da8073
+Mappings:
+  AlarmMap:
+    ManagedAlarms:
+      EC2Alarms: |-
+        {
+            "169c06d0-10a4-4090-b095-209562d4d81a": {"name": "INSTANCE_ID: Root Volume Usage", "insuf_alrm": true},
+            "85b12288-5e26-4ea9-8448-58274bae8b48": {"name": "INSTANCE_ID: Non-Root Volume Usage", "insuf_alrm": false},
+            "1d2b0686-ecc0-4e1d-814c-f4ef3a40f3e9": {"name": "INSTANCE_ID: Log Agent HardFailure", "insuf_alrm": true},
+            "232b314e-2121-452c-a890-af4e12f7530d": {"name": "INSTANCE_ID: CPU Too High", "insuf_alrm": true},
+            "2c263e45-bc6f-4ace-9e81-ebbb25e4993c": {"name": "INSTANCE_ID: Root Volume Inode Usage", "insuf_alrm": true},
+            "5be97ba8-97a8-49fb-bd7e-321e1ade61cc": {"name": "INSTANCE_ID: System Status", "insuf_alrm": true},
+            "97a55e95-294b-44b0-afb4-7bc193fbff74": {"name": "INSTANCE_ID: Memory Free", "insuf_alrm": true},
+            "b41f97ff-0cf8-4c49-a2f2-24bcbf088733": {"name": "INSTANCE_ID: System Status", "insuf_alrm": true},
+            "b6570a8f-5c95-4a23-9af5-32e6a446176b": {"name": "INSTANCE_ID: Swap Free", "insuf_alrm": true},
+            "d484d487-a6e2-4881-821c-dcbdef34a554": {"name": "INSTANCE_ID: EPS DSM Communication", "insuf_alrm": true},
+            "f6c72411-c7d4-4d0f-8d4b-931c8715365f": {"name": "INSTANCE_ID: Memory Free", "insuf_alrm": true},
+            "fd8e5b6b-1d26-45e7-83c9-c034e7434b8b": {"name": "INSTANCE_ID: CPU Too High", "insuf_alrm": true},
+            "c9485c47-6e77-30b4-88da-bbac9aa4ebf2": {"name": "INSTANCE_ID: EndpointUnprotected", "insuf_alrm": false}
+        }
+      RedShiftAlarmsTemplate: |-
+        {
+          "MetricAlarms": [
+            {
+              "AlarmName": "${Redshift::ClusterIdentifier}: RedshiftClusterHealthStatus",
+              "AlarmDescription": "Redshift cluster health status. This alarm is used together with ClusterMaintenanceMode in healthStatus composite alarm with empty alarm action.",
+              "ComparisonOperator": "LessThanThreshold",
+              "EvaluationPeriods": 5,
+              "MetricName": "HealthStatus",
+              "Namespace": "AWS/Redshift",
+              "Period": 60,
+              "Statistic": "Maximum",
+              "Threshold": 1,
+              "ActionsEnabled": true,
+              "Unit": "Count",
+              "Dimensions": [
+                {
+                  "Name": "ClusterIdentifier",
+                  "Value": "${Redshift::ClusterIdentifier}"
+                }
+              ],
+              "TreatMissingData": "notBreaching"
+            },
+            {
+              "AlarmName": "${Redshift::ClusterIdentifier}: RedshiftClusterMaintenanceMode",
+              "AlarmDescription": "Redshift cluster is in maintenance mode. This alarm is used together with ClusterHealthStatus in healthStatus composite alarm with empty alarm action.",
+              "ComparisonOperator": "GreaterThanOrEqualToThreshold",
+              "EvaluationPeriods": 1,
+              "MetricName": "MaintenanceMode",
+              "Namespace": "AWS/Redshift",
+              "Period": 300,
+              "Statistic": "Maximum",
+              "Threshold": 1.0,
+              "ActionsEnabled": true,
+              "Unit": "Count",
+              "Dimensions": [
+                {
+                  "Name": "ClusterIdentifier",
+                  "Value": "${Redshift::ClusterIdentifier}"
+                }
+              ],
+              "TreatMissingData": "notBreaching"
+            }
+          ],
+          "CompositeAlarms": [
+            {
+              "AlarmName": "${Redshift::ClusterIdentifier}: RedshiftClusterStatus",
+              "AlarmDescription": "Redshift Cluster health status for cluster not in maintenance mode.",
+              "AlarmRule": "ALARM(\"${Redshift::ClusterIdentifier}: RedshiftClusterHealthStatus\") AND NOT ALARM(\"${Redshift::ClusterIdentifier}: RedshiftClusterMaintenanceMode\")",
+              "AlarmActions": [
+                "${MMS-Topic}"
+              ],
+              "InsufficientDataActions": [
+                "${MMS-Topic}"
+              ],
+              "OKActions": [
+                "${MMS-Topic}"
+              ]
+            }
+          ]
+        }
+Parameters:
+  AccountType:
+    Type: String
+    Default: Standard
+    AllowedValues:
+    - Standard
+    - ManagedAD
+    Description: The type of account this stack will be deployed within
+  DirectCustomerAlertsTopicName:
+    Type: String
+    Default: Direct-Customer-Alerts
+    AllowedPattern: Direct-Customer-Alerts.*
+    Description: SNS topic name for direct customer notifications
+  MMSTopicName:
+    Type: String
+    Default: MMS-Topic
+    AllowedPattern: MMS-Topic.*
+    Description: SNS topic name for MMS notifications
+Conditions:
+  IsStandardOnly:
+    Fn::Equals:
+    - Ref: AccountType
+    - Standard
+Resources:
+  MONMonitoringStackLambdaDLQ:
+    Type: AWS::SQS::Queue
+    Properties:
+      KmsMasterKeyId: alias/aws/sqs
+      MessageRetentionPeriod: 1209600
+      QueueName: mc-monitoring-lambda-dlq
+  MONDirectoryServiceEventTopicSubscriberRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+        - Action:
+          - sts:AssumeRole
+          Effect: Allow
+          Principal:
+            Service:
+            - lambda.amazonaws.com
+        Version: '2012-10-17'
+      ManagedPolicyArns: []
+      Policies:
+      - PolicyDocument:
+          Statement:
+          - Action: sqs:SendMessage
+            Effect: Allow
+            Resource:
+              Fn::GetAtt: MONMonitoringStackLambdaDLQ.Arn
+          Version: '2012-10-17'
+        PolicyName: DeadLetterQueuePolicy
+      - PolicyDocument:
+          Id: Allow Directory Service Event Topic Subscriber Function
+          Statement:
+          - Action:
+            - ds:DeregisterEventTopic
+            - ds:DescribeDirectories
+            - ds:RegisterEventTopic
+            - sns:GetTopicAttributes
+            Effect: Allow
+            Resource: "*"
+            Sid: AllowRegisterEventTopic
+          - Action:
+            - logs:CreateLogGroup
+            - logs:CreateLogStream
+            - logs:PutLogEvents
+            Effect: Allow
+            Resource:
+            - Fn::Sub: arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/MONDirectoryServiceEventTopicSubscriber:*
+            Sid: AllowCreateAndEmitLogs
+          - Action:
+            - sqs:SendMessage
+            Effect: Allow
+            Resource:
+              Fn::GetAtt:
+              - MONMonitoringStackLambdaDLQ
+              - Arn
+            Sid: AllowLambdaPublishToDLQ
+          Version: '2012-10-17'
+        PolicyName: MONDirectoryServiceEventTopicSubscriberRolePolicy0
+      - PolicyDocument:
+          Statement:
+          - Action:
+            - logs:CreateLogGroup
+            - logs:CreateLogStream
+            - logs:PutLogEvents
+            Effect: Allow
+            Resource:
+              Fn::Sub: arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/MONDirectoryServiceEventTopicSubscriber:*
+          Version: '2012-10-17'
+        PolicyName: MONLambdaLogsPolicy
+      RoleName: mon_directory_service_event_topic_subscriber
+      Tags:
+      - Key: lambda:createdBy
+        Value: SAM
+  MONDirectoryServiceEventTopicSubscriber:
+    Type: AWS::Lambda::Function
+    Properties:
+      Code:
+        ZipFile: "T='ClientException'\nS='Message'\nR='Code'\nQ='DirectoryId'\nP='Data'\nO=Exception\nK='Reason'\nJ='Status'\nI=None\nG='Error'\nF='true'\nE='All'\nD='PhysicalResourceId'\nB='ResourceProperties'\nimport
+          boto3,logging as C,json,threading as U,typing\nfrom urllib3 import Retry,PoolManager
+          as V\nA=C.getLogger(__name__)\nA.setLevel(C.INFO)\nW='SUCCESS'\nX='FAILED'\nclass
+          Y:\n\tdef success(A,data=I,reason=I,physical_resource_id=I):\n\t\tC=physical_resource_id;B=reason;A.response[J]=W\n\t\tif
+          data:A.response[P]=data\n\t\tif B:A.response[K]=B\n\t\tif C:A.response[D]=C\n\tdef
+          failed(A,reason):A.response[J]=X;A.response[K]=reason\n\tdef __call__(B,event,context):\n\t\tI='RequestId';H='StackId';G=context;F='LogicalResourceId';C=event;A.info(f\"Received:{C}\");E=C['RequestType']\n\t\tif
+          E not in['Create','Update','Delete']:raise ValueError(f\"'{E}' invalid RequestType\")\n\t\tB.response_attempted=False;B.event=C;B.response={H:C[H],I:C[I],F:C[F],D:C.get(D,C[F]),P:{}};B._start_timer(G)\n\t\ttry:K=getattr(B,E.lower(),B._default_success_handler);K(C,G)\n\t\texcept
+          O as L:A.exception('failed execution');B.failed(str(L))\n\t\tif J not in
+          B.response:B.success()\n\t\tB._send_response();B._stop_timer();return B.response\n\tdef
+          _default_success_handler(A,event,context):A.success()\n\tdef _send_response(B):\n\t\tif
+          B.response_attempted:return\n\t\tB.response_attempted=True;C=json.dumps(B.response);A.info(f\"Response:{C}\")\n\t\ttry:D=Retry(raise_on_status=True,backoff_factor=0.5,status=3,status_forcelist=range(400,600));V().request('PUT',B.event['ResponseURL'],headers={'Content-Type':''},body=C,retries=D);return\n\t\texcept
+          O as E:F=E\n\t\tB._stop_timer();A.exception('failed to respond');raise F\n\tdef
+          _timeout(B):C='Execution timed out';A.exception(C);B.failed(C);B._send_response();raise
+          TimeoutError()\n\tdef _start_timer(A,context):A.timeout_timer=U.Timer(context.get_remaining_time_in_millis()/1000.0-2.0,A._timeout);A.timeout_timer.start()\n\tdef
+          _stop_timer(A):\n\t\tif A.timeout_timer.is_alive():A.timeout_timer.cancel()\nfrom
+          botocore.exceptions import ClientError as L\nfrom functools import lru_cache
+          as Z\nfrom typing import Generator,Iterator,Tuple\nA=C.getLogger(__name__)\nA.setLevel(C.INFO)\nclass
+          a(Y):\n\tdef create(A,event,context):C=event;A.update_response(context);D,G=A.extract_parmon(resource_properties=C[B],all_directories=C[B].get(E)==F);M(D,G)\n\tdef
+          update(C,event,context):A=event;C.update_response(context);D,G=C.extract_parmon(resource_properties=A['OldResourceProperties'],all_directories=A[B].get(E)==F);N(D,G);H,I=C.extract_parmon(resource_properties=A[B],all_directories=A[B].get(E)==F);M(H,I)\n\tdef
+          delete(A,event,context):C=event;A.update_response(context);D,G=A.extract_parmon(resource_properties=C[B],all_directories=C[B].get(E)==F);N(D,G)\n\tdef
+          update_response(A,context):B=context;A.response[K]=f\"See the details in
+          CloudWatch Log Stream: {B.log_stream_name}\";A.response[D]=B.log_stream_name\n\t@staticmethod\n\tdef
+          extract_parmon(resource_properties,all_directories):A=resource_properties;B=b()if
+          all_directories else[A[Q]];C=A['TopicName'];return B,C\ndef M(directory_ids,topic_name):\n\tB=topic_name\n\tfor
+          C in directory_ids:\n\t\ttry:H().register_event_topic(DirectoryId=C,TopicName=B);A.info(f\"Successfully
+          registered DirectoryId {C} to Topic {B}.\")\n\t\texcept L as D:\n\t\t\tE=D.response[G][R];F=D.response[G][S]\n\t\t\tif
+          E==T and'Directory already has same topic registered'in F:A.warning(f\"DirectoryId
+          {C} is already registered to Topic {B}.\");continue\n\t\t\traise\ndef N(directory_ids,topic_name):\n\tB=topic_name\n\tfor
+          C in directory_ids:\n\t\ttry:H().deregister_event_topic(DirectoryId=C,TopicName=B);A.info(f\"Successfully
+          deregistered DirectoryId {C} from Topic {B}.\")\n\t\texcept L as D:\n\t\t\tE=D.response[G][R];F=D.response[G][S]\n\t\t\tif
+          E==T and'has not been registered for directory'in F:A.warning(f\"DirectoryId
+          {C} has not been registered to Topic {B}.\");continue\n\t\t\traise\ndef
+          b():\n\tA=H().get_paginator('describe_directories');B=A.paginate()\n\tfor
+          C in B:\n\t\tfor D in C['DirectoryDescriptions']:yield D[Q]\n@Z(maxsize=1)\ndef
+          H():return boto3.client('ds')\nhandler=a()"
+      Role:
+        Fn::GetAtt:
+        - MONDirectoryServiceEventTopicSubscriberRole
+        - Arn
+      DeadLetterConfig:
+        TargetArn:
+          Fn::GetAtt: MONMonitoringStackLambdaDLQ.Arn
+      FunctionName: MONDirectoryServiceEventTopicSubscriber
+      Handler: index.handler
+      MemorySize: 128
+      ReservedConcurrentExecutions: 2
+      Runtime: python3.7
+      Tags:
+      - Key: lambda:createdBy
+        Value: SAM
+      Timeout: 60
+  SNSTopicCmk:
+    Type: AWS::KMS::Key
+    Properties:
+      KeyPolicy:
+        Id: SNSTopicKmsKey
+        Statement:
+        - Action: kms:*
+          Effect: Allow
+          Principal:
+            AWS:
+              Fn::Sub: arn:${AWS::Partition}:iam::${AWS::AccountId}:root
+          Resource: "*"
+          Sid: Allow IAM user permissions
+        - Action:
+          - kms:Decrypt
+          - kms:GenerateDataKey*
+          Condition:
+            StringEquals:
+              kms:CallerAccount:
+                Ref: AWS::AccountId
+          Effect: Allow
+          Principal:
+            AWS: "*"
+          Resource: "*"
+          Sid: Allow all principals in the account to use this key
+        - Action:
+          - kms:Decrypt
+          - kms:GenerateDataKey*
+          Effect: Allow
+          Principal:
+            Service:
+            - Fn::Sub: sns.${AWS::URLSuffix}
+            - Fn::Sub: events.${AWS::URLSuffix}
+            - Fn::Sub: cloudwatch.${AWS::URLSuffix}
+            - Fn::Sub: ds.${AWS::URLSuffix}
+            - Fn::Sub: backup.${AWS::URLSuffix}
+          Resource: "*"
+          Sid: Allow SNS, CW Events, CW Alarms, Directory Service and Backup to use
+            this key
+        Version: '2012-10-17'
+      EnableKeyRotation: true
+  SNSTopicCmkAlias:
+    Type: AWS::KMS::Alias
+    Properties:
+      AliasName: alias/sns_topic_key
+      TargetKeyId:
+        Ref: SNSTopicCmk
+  MONMMSSNSTopicManagerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+        - Action:
+          - sts:AssumeRole
+          Effect: Allow
+          Principal:
+            Service:
+            - lambda.amazonaws.com
+        Version: '2012-10-17'
+      ManagedPolicyArns: []
+      Policies:
+      - PolicyDocument:
+          Statement:
+          - Action: sqs:SendMessage
+            Effect: Allow
+            Resource:
+              Fn::GetAtt: MONMonitoringStackLambdaDLQ.Arn
+          Version: '2012-10-17'
+        PolicyName: DeadLetterQueuePolicy
+      - PolicyDocument:
+          Statement:
+          - Action:
+            - sns:CreateTopic
+            - sns:DeleteTopic
+            - sns:SetTopicAttributes
+            Effect: Allow
+            Resource:
+            - Fn::Sub: arn:${AWS::Partition}:sns:${AWS::Region}:${AWS::AccountId}:MMS-Topic*
+          Version: '2012-10-17'
+        PolicyName: MONMMSSNSTopicManagerRolePolicy0
+      - PolicyDocument:
+          Statement:
+          - Action:
+            - logs:CreateLogGroup
+            - logs:CreateLogStream
+            - logs:PutLogEvents
+            Effect: Allow
+            Resource:
+            - Fn::Sub: arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/MONMMSSNSTopicManager:*
+          Version: '2012-10-17'
+        PolicyName: MONMMSSNSTopicManagerRolePolicy1
+      - PolicyDocument:
+          Statement:
+          - Action: sqs:SendMessage
+            Effect: Allow
+            Resource:
+              Fn::GetAtt:
+              - MONMonitoringStackLambdaDLQ
+              - Arn
+          Version: '2012-10-17'
+        PolicyName: MONMMSSNSTopicManagerRolePolicy2
+      - PolicyDocument:
+          Statement:
+          - Action:
+            - logs:CreateLogGroup
+            - logs:CreateLogStream
+            - logs:PutLogEvents
+            Effect: Allow
+            Resource:
+              Fn::Sub: arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/MONMMSSNSTopicManager:*
+          Version: '2012-10-17'
+        PolicyName: MONLambdaLogsPolicy
+      RoleName: monmmssns_topic_manager
+      Tags:
+      - Key: lambda:createdBy
+        Value: SAM
+  MONMMSSNSTopicManager:
+    Type: AWS::Lambda::Function
+    Properties:
+      Code:
+        ZipFile: "K='Reason'\nJ='Data'\nI=Exception\nH='KmsMasterKeyId'\nG='PhysicalResourceId'\nF='Status'\nE=None\nA='TopicArn'\nimport
+          typing,json,logging as C,threading as L\nfrom urllib3 import Retry,PoolManager
+          as M\nB=C.getLogger(__name__)\nB.setLevel(C.INFO)\nN='SUCCESS'\nO='FAILED'\nclass
+          P:\n\tdef success(A,data=E,reason=E,physical_resource_id=E):\n\t\tC=physical_resource_id;B=reason;A.response[F]=N\n\t\tif
+          data:A.response[J]=data\n\t\tif B:A.response[K]=B\n\t\tif C:A.response[G]=C\n\tdef
+          failed(A,reason):A.response[F]=O;A.response[K]=reason\n\tdef __call__(A,event,context):\n\t\tL='RequestId';K='StackId';H=context;E='LogicalResourceId';C=event;B.info(f\"Received:{C}\");D=C['RequestType']\n\t\tif
+          D not in['Create','Update','Delete']:raise ValueError(f\"'{D}' invalid RequestType\")\n\t\tA.response_attempted=False;A.event=C;A.response={K:C[K],L:C[L],E:C[E],G:C.get(G,C[E]),J:{}};A._start_timer(H)\n\t\ttry:M=getattr(A,D.lower(),A._default_success_handler);M(C,H)\n\t\texcept
+          I as N:B.exception('failed execution');A.failed(str(N))\n\t\tif F not in
+          A.response:A.success()\n\t\tA._send_response();A._stop_timer();return A.response\n\tdef
+          _default_success_handler(A,event,context):A.success()\n\tdef _send_response(A):\n\t\tif
+          A.response_attempted:return\n\t\tA.response_attempted=True;C=json.dumps(A.response);B.info(f\"Response:{C}\")\n\t\ttry:D=Retry(raise_on_status=True,backoff_factor=0.5,status=3,status_forcelist=range(400,600));M().request('PUT',A.event['ResponseURL'],headers={'Content-Type':''},body=C,retries=D);return\n\t\texcept
+          I as E:F=E\n\t\tA._stop_timer();B.exception('failed to respond');raise F\n\tdef
+          _timeout(A):C='Execution timed out';B.exception(C);A.failed(C);A._send_response();raise
+          TimeoutError()\n\tdef _start_timer(A,context):A.timeout_timer=L.Timer(context.get_remaining_time_in_millis()/1000.0-2.0,A._timeout);A.timeout_timer.start()\n\tdef
+          _stop_timer(A):\n\t\tif A.timeout_timer.is_alive():A.timeout_timer.cancel()\nimport
+          boto3\nfrom botocore.exceptions import ClientError as Q\nfrom functools
+          import lru_cache as R\nfrom collections import namedtuple as S\nB=C.getLogger(__name__)\nB.setLevel(C.INFO)\nclass
+          T(P):\n\tdef create(A,event,_context):A.update(event,_context)\n\tdef update(C,event,context):\n\t\tE=C._extract_parmon(event,context);G=E.topic_name;F=E.topic_arn;I=E.kms_master_key_id\n\t\ttry:D().set_topic_attributes(TopicArn=F,AttributeName=H,AttributeValue=I);C.success(data={A:F},physical_resource_id=F)\n\t\texcept
+          Q as J:\n\t\t\tif J.response['Error']['Code']=='NotFound':B.info(f\"Topic:
+          {G} does not exist\");K=D().create_topic(Name=G,Attributes={H:I});C.success(data={A:K[A]},physical_resource_id=K[A])\n\t\t\telse:raise
+          J\n\tdef delete(C,event,context):B=C._extract_parmon(event,context).topic_arn;D().delete_topic(TopicArn=B);C.success(data={A:B},physical_resource_id=B)\n\t@staticmethod\n\tdef
+          _extract_parmon(event,context):D='ResourceProperties';B=event;E=S('TopicParmon',['topic_name','topic_arn','kms_master_key_id']);C=B[D]['TopicName'];A=context.invoked_function_arn.split(':');F=f\"arn:{A[1]}:sns:{A[3]}:{A[4]}:{C}\";G=B[D][H];return
+          E(C,F,G)\n@R(maxsize=1)\ndef D():return boto3.client('sns')\nhandler=T()"
+      Role:
+        Fn::GetAtt:
+        - MONMMSSNSTopicManagerRole
+        - Arn
+      DeadLetterConfig:
+        TargetArn:
+          Fn::GetAtt: MONMonitoringStackLambdaDLQ.Arn
+      Description: Manages create/update/delete of the MMS SNS Topic (for use via
+        CloudFormation).
+      FunctionName: MONMMSSNSTopicManager
+      Handler: index.handler
+      MemorySize: 128
+      ReservedConcurrentExecutions: 2
+      Runtime: python3.7
+      Tags:
+      - Key: lambda:createdBy
+        Value: SAM
+      Timeout: 60
+  MMSTopic:
+    Type: Custom::MMSTopic
+    Properties:
+      KmsMasterKeyId:
+        Ref: SNSTopicCmkAlias
+      ServiceToken:
+        Fn::GetAtt: MONMMSSNSTopicManager.Arn
+      TopicName:
+        Ref: MMSTopicName
+  MONDirectoryServiceEventsLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+        - Action:
+          - sts:AssumeRole
+          Effect: Allow
+          Principal:
+            Service:
+            - lambda.amazonaws.com
+        Version: '2012-10-17'
+      ManagedPolicyArns: []
+      Policies:
+      - PolicyDocument:
+          Statement:
+          - Action: sqs:SendMessage
+            Effect: Allow
+            Resource:
+              Fn::GetAtt: MONMonitoringStackLambdaDLQ.Arn
+          Version: '2012-10-17'
+        PolicyName: DeadLetterQueuePolicy
+      - PolicyDocument:
+          Id: Allow Directory Service Events Function
+          Statement:
+          - Action:
+            - sns:Publish
+            Effect: Allow
+            Resource:
+              Fn::GetAtt:
+              - MMSTopic
+              - TopicArn
+            Sid: AllowPublishToTopic
+          - Action:
+            - logs:CreateLogGroup
+            - logs:CreateLogStream
+            - logs:PutLogEvents
+            Effect: Allow
+            Resource:
+            - Fn::Sub: arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/MONDirectoryServiceEvents:*
+            Sid: AllowCreateAndEmitLogs
+          - Action:
+            - sqs:SendMessage
+            Effect: Allow
+            Resource:
+              Fn::GetAtt:
+              - MONMonitoringStackLambdaDLQ
+              - Arn
+            Sid: AllowLambdaPublishToDLQ
+          Version: '2012-10-17'
+        PolicyName: MONDirectoryServiceEventsLambdaRolePolicy0
+      - PolicyDocument:
+          Statement:
+          - Action:
+            - logs:CreateLogGroup
+            - logs:CreateLogStream
+            - logs:PutLogEvents
+            Effect: Allow
+            Resource:
+              Fn::Sub: arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/MONDirectoryServiceEvents:*
+          Version: '2012-10-17'
+        PolicyName: MONLambdaLogsPolicy
+      RoleName: mon_directory_service_events
+      Tags:
+      - Key: lambda:createdBy
+        Value: SAM
+  MONDirectoryServiceEventsLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      Code:
+        ZipFile: "F='Sns'\nimport boto3,json as E,logging as B,os\nfrom botocore.exceptions
+          import ClientError as H\nfrom functools import lru_cache as C\nA=B.getLogger(__name__)\nA.setLevel(B.INFO)\ndef
+          handler(event,context):B=event;A.info(f\"Received Event: {B}\");C=os.environ['MMSTopicArn'];E=context.invoked_function_arn.split(':')[4];F=B['Records'];D(F,E,C)\ndef
+          D(records,account_id,sns_topic_arn):\n\tB=sns_topic_arn;C=0\n\tfor G in
+          records:\n\t\ttry:D=I(G,account_id);K=G[F]['Subject'];J().publish(Message=E.dumps(D),Subject=K,TopicArn=B);A.info(f\"Successfully
+          published Message {D} to Topic {B}\")\n\t\texcept H:A.exception(f\"Failed
+          to publish Message {D} to Topic {B}\");C+=1\n\tif C>0:raise RuntimeError(f\"SNS
+          publish failed {C} times.\")\ndef I(record,account_id):A=E.loads(record[F]['Message']);A['account']=account_id;return
+          A\n@C(maxsize=1)\ndef J():return boto3.client('sns')"
+      Role:
+        Fn::GetAtt:
+        - MONDirectoryServiceEventsLambdaRole
+        - Arn
+      Environment:
+        Variables:
+          MMSTopicArn:
+            Fn::GetAtt: MMSTopic.TopicArn
+      FunctionName: MONDirectoryServiceEvents
+      Handler: index.handler
+      MemorySize: 128
+      ReservedConcurrentExecutions: 2
+      Runtime: python3.7
+      Tags:
+      - Key: lambda:createdBy
+        Value: SAM
+      Timeout: 60
+  MMSDirectoryServiceEventsSNSTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      KmsMasterKeyId:
+        Ref: SNSTopicCmkAlias
+      TopicName: MON-MMS-DirectoryService-Events
+  MONDirectoryServiceEventsLambdaSNSEvent:
+    Type: AWS::SNS::Subscription
+    Properties:
+      Protocol: lambda
+      TopicArn:
+        Ref: MMSDirectoryServiceEventsSNSTopic
+      Endpoint:
+        Fn::GetAtt:
+        - MONDirectoryServiceEventsLambda
+        - Arn
+  MONDirectoryServiceEventsLambdaSNSEventPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName:
+        Ref: MONDirectoryServiceEventsLambda
+      Principal: sns.amazonaws.com
+      SourceArn:
+        Ref: MMSDirectoryServiceEventsSNSTopic
+  MONMonitoringStackPeriodicLambdaDLQ:
+    Type: AWS::SQS::Queue
+    Properties:
+      KmsMasterKeyId: alias/aws/sqs
+      MessageRetentionPeriod: 86400
+      QueueName: mc-monitoring-periodic-lambda-dlq
+  MONEC2AlarmManagerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+        - Action:
+          - sts:AssumeRole
+          Effect: Allow
+          Principal:
+            Service:
+            - lambda.amazonaws.com
+        Version: '2012-10-17'
+      ManagedPolicyArns:
+      - arn:aws:iam::aws:policy/AWSXrayWriteOnlyAccess
+      Policies:
+      - PolicyDocument:
+          Statement:
+          - Action: sqs:SendMessage
+            Effect: Allow
+            Resource:
+              Fn::GetAtt: MONMonitoringStackPeriodicLambdaDLQ.Arn
+          Version: '2012-10-17'
+        PolicyName: DeadLetterQueuePolicy
+      - PolicyDocument:
+          Id: Allow EC2 Alarm Manager
+          Statement:
+          - Action:
+            - cloudwatch:DescribeAlarms
+            - cloudwatch:DeleteAlarms
+            - cloudwatch:PutMetricAlarm
+            Effect: Allow
+            Resource:
+            - Fn::Sub: arn:${AWS::Partition}:cloudwatch:${AWS::Region}:${AWS::AccountId}:alarm:*
+            Sid: AllowModifyAlarms
+          - Action:
+            - cloudwatch:PutMetricData
+            Effect: Allow
+            Resource:
+            - "*"
+            Sid: AllowEmitMetrics
+          - Action:
+            - ec2:DescribeInstances
+            Effect: Allow
+            Resource:
+            - "*"
+            Sid: AllowEc2DescribeInstances
+          - Action: sqs:SendMessage
+            Effect: Allow
+            Resource:
+              Fn::GetAtt:
+              - MONMonitoringStackPeriodicLambdaDLQ
+              - Arn
+            Sid: AllowLambdaPublishToDLQ
+          Version: '2012-10-17'
+        PolicyName: MONEC2AlarmManagerRolePolicy0
+      - PolicyDocument:
+          Statement:
+          - Action:
+            - lambda:InvokeFunction
+            Effect: Allow
+            Resource:
+              Fn::Sub:
+              - arn:${AWS::Partition}:lambda:${AWS::Region}:${AWS::AccountId}:function:${functionName}*
+              - functionName: MONNewEc2InstanceEventSender
+        PolicyName: MONEC2AlarmManagerRolePolicy1
+      - PolicyDocument:
+          Statement:
+          - Action:
+            - logs:CreateLogGroup
+            - logs:CreateLogStream
+            - logs:PutLogEvents
+            Effect: Allow
+            Resource:
+              Fn::Sub: arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/MONEC2AlarmManager:*
+          Version: '2012-10-17'
+        PolicyName: MONLambdaLogsPolicy
+      RoleName: monec2_alarm_manager
+      Tags:
+      - Key: lambda:createdBy
+        Value: SAM
+  MONEC2AlarmManager:
+    Type: AWS::Lambda::Function
+    Properties:
+      Code:
+        ZipFile: "j='Name'\ni='Instances'\nh='INSTANCE_ID'\ng='name'\nf='unmanaged'\ne='managed'\nd='infrastructure'\nc='Fail'\nb='Success'\na='SecondsSinceLaunch'\nW='Value'\nV='NON_BASELINE_ALARMS'\nU='ORPHANED_ALARMS'\nT='EC2_SVCD_PER_RUN'\nS='EC2_AGE_THRESH_SECS'\nR='Platform'\nQ='EC2_TYPES_SVCD'\nP=int\nL='ALARMS_BY_PLAT'\nJ='MANAGED_ALARMS'\nF='Account
+          Totals'\nE='LIVE'\nB=len\nimport boto3 as M,json as G,logging as H,os as
+          D,re,sys\nfrom botocore.exceptions import ClientError as X\nfrom datetime
+          import datetime as k\nfrom functools import lru_cache as K\nfrom typing
+          import Dict\nC=H.getLogger()\nC.setLevel(H.INFO)\nN=H.StreamHandler(sys.stdout)\nC.addHandler(N)\ndef
+          handler(event,context):\n\tG='Delete Alarms';F='Create Alarms';D=event;B='Invoke
+          Type'\n\tif I()[E]:N.setFormatter(H.Formatter('%(levelname)s - %(message)s'))\n\telse:N.setFormatter(H.Formatter('%(levelname)s
+          - NON LIVE - %(message)s'))\n\tif D[B]=='create_alarms':C.info(F);A(B,F,1);l()\n\telif
+          D[B]=='delete_alarms':C.info(G);A(B,G,1);m()\ndef l():\n\tM='Alarm Creation';K=Y();U=Z();L={};N=0;H=I()\n\tfor
+          J in H[Q]:\n\t\tfor D in K[J]:\n\t\t\tif o(U,D,K[J][D][R]):\n\t\t\t\tO=K[J][D][a];A(M,'Instance
+          Age',O)\n\t\t\t\tif P(O)<H[S]:continue\n\t\t\t\tL[D]=J\n\tA(F,'Instances
+          with Missing Alarms',B(L))\n\tfor (D,V) in L.items():\n\t\tif N==H[T]:C.info('Max
+          count. Terminating');return\n\t\ttry:\n\t\t\tif H[E]:W={'instanceId':D};p().invoke_async(FunctionName='MONNewEc2InstanceEventSender',InvokeArgs=G.dumps(W))\n\t\t\tC.info(f\"Created
+          alarms for {V} instance {D}\");A(M,b,1);N+=1\n\t\texcept X as d:C.exception(f\"Couldnt
+          create for {D} {d}\");A(M,c,1)\ndef m():\n\tS='Alarm Deletion';K=Y();T={**K[d],**K[e],**K[f]};W=Z();D=[];a=re.compile('^((i-[a-z0-9]{8})|(i-[a-z0-9]{17})):');G=I();i=[A[g]for
+          A in G[J].values()];j=G[U];k=G[V]\n\tfor H in W:\n\t\ttry:M=a.search(H).group(1)\n\t\texcept
+          AttributeError:continue\n\t\tL=H.replace(M,h);N=M in T;l=L in i\n\t\tif
+          not N and l or L in j:D.append(H)\n\t\tif not N and L in k:D.append(H)\n\tif
+          not D:C.info('No alarms to delete');return\n\tP=50;Q=0;R=0;m=(D[A:A+P]for
+          A in range(0,B(D),P))\n\tfor F in m:\n\t\ttry:\n\t\t\tif G[E]:O().delete_alarms(AlarmNames=F)\n\t\t\tQ+=B(F);C.info(f\"Deleted
+          alarms {F}\")\n\t\texcept X as n:C.info(f\"Failed delete alarms {F} {n}\");R+=B(F)\n\tA(S,b,Q);A(S,c,R)\ndef
+          n(pager):\n\tfor A in pager:\n\t\tfor B in A['Reservations']:\n\t\t\tfor
+          C in B[i]:yield C\ndef Y():\n\tD={};E={};G={};J=q().get_paginator('describe_instances');K={'Filters':[{j:'instance-state-name','Values':['running']}]};L=J.paginate(**K)\n\tfor
+          H in n(L):\n\t\tC=next((A[W]for A in H.get('Tags',[])if A.get('Key')=='aws:cloudformation:stack-name'),'');I=G\n\t\tif
+          C.startswith('mon-')or C.startswith('mc-')or C.startswith('StackSet-mon-'):I=D\n\t\tif
+          C.startswith('stack-')or C.startswith('SC-'):I=E\n\t\tI[H['InstanceId']]={R:H.get(R,'linux').lower(),a:(k.utcnow()-H['LaunchTime'].replace(tzinfo=None)).total_seconds()}\n\tA(F,i,B(D)+B(E)+B(G));A(F,'Infrastructure
+          Instances',B(D));A(F,'Managed Instances',B(E));A(F,'Unmanaged Instances',B(G));return{e:E,f:G,d:D}\ndef
+          o(instance_alarms,instance_id,platform):\n\tH='Observations';E=instance_alarms;B=I();C=0;D=0\n\tfor
+          F in B[L][platform]+B[L]['global']:\n\t\tG=B[J][F][g].replace(h,instance_id)\n\t\tif
+          G in E:\n\t\t\tif B[J][F]['insuf_alrm']!=E[G]:C+=1\n\t\telse:D+=1\n\tA(H,'Missing
+          Insufficient Data Config',C);A(H,'Missing Alarms',D);return bool(C or D)\ndef
+          Z():\n\tE=O().get_paginator('describe_alarms');G=E.paginate(AlarmNamePrefix='i-');C={}\n\tfor
+          H in G:\n\t\tfor D in H['MetricAlarms']:C[D['AlarmName']]=True if D['InsufficientDataActions']else
+          False\n\tA(F,'Instance Alarms',B(C));return C\ndef A(name,value,count):A='MONAlarmManager'if
+          I()[E]else'MONAlarmManager - NON LIVE';O().put_metric_data(Namespace='MON/Monitoring',MetricData=[{'MetricName':A,'Dimensions':[{j:f\"{name}\",W:f\"{value}\"}],W:count,'Unit':'Count'}])\n@K(maxsize=1)\ndef
+          O():return M.client('cloudwatch')\n@K(maxsize=1)\ndef p():return M.client('lambda')\n@K(maxsize=1)\ndef
+          q():return M.client('ec2')\n@K(maxsize=1)\ndef I():return{J:G.loads(D.environ[J]),L:G.loads(D.environ[L]),S:P(D.environ[S]),Q:G.loads(D.environ[Q]),T:P(D.environ[T]),U:G.loads(D.environ[U]),V:D.environ[V],E:str(D.environ[E]).lower()=='true'}"
+      Role:
+        Fn::GetAtt:
+        - MONEC2AlarmManagerRole
+        - Arn
+      Environment:
+        Variables:
+          ALARMS_BY_PLAT: |-
+            {
+                "global": [
+                    "169c06d0-10a4-4090-b095-209562d4d81a",
+                    "1d2b0686-ecc0-4e1d-814c-f4ef3a40f3e9",
+                    "85b12288-5e26-4ea9-8448-58274bae8b48",
+                    "c9485c47-6e77-30b4-88da-bbac9aa4ebf2"
+                ],
+                "windows": [
+                    "232b314e-2121-452c-a890-af4e12f7530d",
+                    "5be97ba8-97a8-49fb-bd7e-321e1ade61cc",
+                    "f6c72411-c7d4-4d0f-8d4b-931c8715365f"
+                ],
+                "linux": [
+                    "2c263e45-bc6f-4ace-9e81-ebbb25e4993c",
+                    "97a55e95-294b-44b0-afb4-7bc193fbff74",
+                    "b41f97ff-0cf8-4c49-a2f2-24bcbf088733",
+                    "b6570a8f-5c95-4a23-9af5-32e6a446176b",
+                    "d484d487-a6e2-4881-821c-dcbdef34a554",
+                    "fd8e5b6b-1d26-45e7-83c9-c034e7434b8b"
+                ]
+            }
+          EC2_AGE_THRESH_SECS: '1800'
+          EC2_SVCD_PER_RUN: '50'
+          EC2_TYPES_SVCD: '["managed"]'
+          LIVE: 'True'
+          MANAGED_ALARMS:
+            Fn::FindInMap:
+            - AlarmMap
+            - ManagedAlarms
+            - EC2Alarms
+          NON_BASELINE_ALARMS: |-
+            [
+                    "INSTANCE_ID: UnhealthyBastionFriendlyDNS",
+                    "INSTANCE_ID: Unmanaged by EPS",
+                    "INSTANCE_ID: BastionFriendlyDNSSecurity",]
+          ORPHANED_ALARMS: |-
+            [
+              "INSTANCE_ID: Greatest iowait"
+            ]
+      FunctionName: MONEC2AlarmManager
+      Handler: index.handler
+      MemorySize: 256
+      ReservedConcurrentExecutions: 2
+      Runtime: python3.7
+      Tags:
+      - Key: lambda:createdBy
+        Value: SAM
+      Timeout: 900
+      TracingConfig:
+        Mode: Active
+  MONEC2AlarmManagerInvokeCreateAlarms:
+    Type: AWS::Events::Rule
+    Properties:
+      ScheduleExpression: rate(60 minutes)
+      Targets:
+      - Arn:
+          Fn::GetAtt:
+          - MONEC2AlarmManager
+          - Arn
+        Id: MONEC2AlarmManagerInvokeCreateAlarmsLambdaTarget
+        Input: '{"Invoke Type": "create_alarms"}'
+  MONEC2AlarmManagerInvokeCreateAlarmsPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName:
+        Ref: MONEC2AlarmManager
+      Principal: events.amazonaws.com
+      SourceArn:
+        Fn::GetAtt:
+        - MONEC2AlarmManagerInvokeCreateAlarms
+        - Arn
+  MONEC2AlarmManagerInvokeDeleteAlarms:
+    Type: AWS::Events::Rule
+    Properties:
+      ScheduleExpression: rate(60 minutes)
+      Targets:
+      - Arn:
+          Fn::GetAtt:
+          - MONEC2AlarmManager
+          - Arn
+        Id: MONEC2AlarmManagerInvokeDeleteAlarmsLambdaTarget
+        Input: '{"Invoke Type": "delete_alarms"}'
+  MONEC2AlarmManagerInvokeDeleteAlarmsPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName:
+        Ref: MONEC2AlarmManager
+      Principal: events.amazonaws.com
+      SourceArn:
+        Fn::GetAtt:
+        - MONEC2AlarmManagerInvokeDeleteAlarms
+        - Arn
+  MONIAMRoleAgeEmitterRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+        - Action:
+          - sts:AssumeRole
+          Effect: Allow
+          Principal:
+            Service:
+            - lambda.amazonaws.com
+        Version: '2012-10-17'
+      ManagedPolicyArns:
+      - arn:aws:iam::aws:policy/AWSXrayWriteOnlyAccess
+      Policies:
+      - PolicyDocument:
+          Statement:
+          - Action: sqs:SendMessage
+            Effect: Allow
+            Resource:
+              Fn::GetAtt: MONMonitoringStackLambdaDLQ.Arn
+          Version: '2012-10-17'
+        PolicyName: DeadLetterQueuePolicy
+      - PolicyDocument:
+          Id: Allow IAM role monitor to perform required actions
+          Statement:
+          - Action:
+            - iam:GetRole
+            Effect: Allow
+            Resource:
+            - Fn::Sub: arn:${AWS::Partition}:iam::${AWS::AccountId}:role/aws_managedservices_onboarding_role
+            Sid: AllowGetRole
+          - Action:
+            - cloudwatch:PutMetricData
+            Effect: Allow
+            Resource:
+            - "*"
+            Sid: AllowEmitMetrics
+          - Action:
+            - sqs:SendMessage
+            Effect: Allow
+            Resource:
+              Fn::GetAtt:
+              - MONMonitoringStackLambdaDLQ
+              - Arn
+            Sid: AllowLambdaPublishToDLQ
+          Version: '2012-10-17'
+        PolicyName: MONIAMRoleAgeEmitterRolePolicy0
+      - PolicyDocument:
+          Statement:
+          - Action:
+            - logs:CreateLogGroup
+            - logs:CreateLogStream
+            - logs:PutLogEvents
+            Effect: Allow
+            Resource:
+              Fn::Sub: arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/MONIAMRoleAgeEmitter:*
+          Version: '2012-10-17'
+        PolicyName: MONLambdaLogsPolicy
+      RoleName: moniam_role_age_emitter
+      Tags:
+      - Key: lambda:createdBy
+        Value: SAM
+  MONIAMRoleAgeEmitter:
+    Type: AWS::Lambda::Function
+    Properties:
+      Code:
+        ZipFile: "import boto3 as A,json,logging as C,os\nfrom botocore.exceptions
+          import ClientError\nfrom functools import lru_cache as D\nfrom datetime
+          import datetime as G,timezone as H\nB=C.getLogger()\nB.setLevel(C.INFO)\ndef
+          handler(_event,_context):\n\tF='Value';D=J();K=G.now(H.utc);C=[]\n\tfor
+          A in os.environ['ROLE_NAMES'].split(','):\n\t\ttry:E=D.Role(A).create_date;L=K-E;C.append((A,L.total_seconds()));B.info('%s
+          role exists since %s.',A,E)\n\t\texcept D.meta.client.exceptions.NoSuchEntityException:B.info('%s
+          role does not exist.',A)\n\tif C:I().put_metric_data(Namespace='MON/Monitoring',MetricData=[{'MetricName':'IAM
+          Role Age','Dimensions':[{'Name':'Role Name',F:A}],F:B,'Unit':'Seconds'}for(A,B)in
+          C])\n@D(maxsize=1)\ndef I():return A.client('cloudwatch')\n@D(maxsize=1)\ndef
+          J():return A.resource('iam')"
+      Role:
+        Fn::GetAtt:
+        - MONIAMRoleAgeEmitterRole
+        - Arn
+      DeadLetterConfig:
+        TargetArn:
+          Fn::GetAtt: MONMonitoringStackLambdaDLQ.Arn
+      Environment:
+        Variables:
+          ROLE_NAMES: aws_managedservices_onboarding_role
+      FunctionName: MONIAMRoleAgeEmitter
+      Handler: index.handler
+      MemorySize: 128
+      ReservedConcurrentExecutions: 2
+      Runtime: python3.7
+      Tags:
+      - Key: lambda:createdBy
+        Value: SAM
+      Timeout: 60
+      TracingConfig:
+        Mode: Active
+    DependsOn:
+    - MONMonitoringStackTermination
+  MONMonitoringStackTerminationRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+        - Action:
+          - sts:AssumeRole
+          Effect: Allow
+          Principal:
+            Service:
+            - lambda.amazonaws.com
+        Version: '2012-10-17'
+      ManagedPolicyArns: []
+      Policies:
+      - PolicyDocument:
+          Statement:
+          - Action:
+            - sns:Publish
+            Effect: Allow
+            Resource:
+            - Fn::GetAtt:
+              - MMSTopic
+              - TopicArn
+            Sid: AllowSnsPublish
+          Version: '2012-10-17'
+        PolicyName: MONMonitoringStackTerminationRolePolicy0
+      - PolicyDocument:
+          Statement:
+          - Action:
+            - logs:CreateLogGroup
+            - logs:CreateLogStream
+            - logs:PutLogEvents
+            Effect: Allow
+            Resource:
+              Fn::Sub: arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/MONMonitoringStackTermination:*
+          Version: '2012-10-17'
+        PolicyName: MONLambdaLogsPolicy
+      RoleName: mon_monitoring_stack_termination
+      Tags:
+      - Key: lambda:createdBy
+        Value: SAM
+  MONMonitoringStackTermination:
+    Type: AWS::Lambda::Function
+    Properties:
+      Code:
+        ZipFile: "J='TOPIC_ARN'\nG='Reason'\nI='Data'\nH=Exception\nE='PhysicalResourceId'\nD='Status'\nA=None\nimport
+          json as B,os\nfrom datetime import datetime as K,timezone as L\nfrom functools
+          import lru_cache as M\nimport logging as F,threading as N,typing\nfrom urllib3
+          import Retry,PoolManager as O\nC=F.getLogger(__name__)\nC.setLevel(F.INFO)\nP='SUCCESS'\nQ='FAILED'\nclass
+          R:\n\tdef success(A,data=A,reason=A,physical_resource_id=A):\n\t\tC=physical_resource_id;B=reason;A.response[D]=P\n\t\tif
+          data:A.response[I]=data\n\t\tif B:A.response[G]=B\n\t\tif C:A.response[E]=C\n\tdef
+          failed(A,reason):A.response[D]=Q;A.response[G]=reason\n\tdef __call__(A,event,context):\n\t\tL='RequestId';K='StackId';J=context;G='LogicalResourceId';B=event;C.info(f\"Received:{B}\");F=B['RequestType']\n\t\tif
+          F not in['Create','Update','Delete']:raise ValueError(f\"'{F}' invalid RequestType\")\n\t\tA.response_attempted=False;A.event=B;A.response={K:B[K],L:B[L],G:B[G],E:B.get(E,B[G]),I:{}};A._start_timer(J)\n\t\ttry:M=getattr(A,F.lower(),A._default_success_handler);M(B,J)\n\t\texcept
+          H as N:C.exception('failed execution');A.failed(str(N))\n\t\tif D not in
+          A.response:A.success()\n\t\tA._send_response();A._stop_timer();return A.response\n\tdef
+          _default_success_handler(A,event,context):A.success()\n\tdef _send_response(A):\n\t\tif
+          A.response_attempted:return\n\t\tA.response_attempted=True;D=B.dumps(A.response);C.info(f\"Response:{D}\")\n\t\ttry:E=Retry(raise_on_status=True,backoff_factor=0.5,status=3,status_forcelist=range(400,600));O().request('PUT',A.event['ResponseURL'],headers={'Content-Type':''},body=D,retries=E);return\n\t\texcept
+          H as F:G=F\n\t\tA._stop_timer();C.exception('failed to respond');raise G\n\tdef
+          _timeout(A):B='Execution timed out';C.exception(B);A.failed(B);A._send_response();raise
+          TimeoutError()\n\tdef _start_timer(A,context):A.timeout_timer=N.Timer(context.get_remaining_time_in_millis()/1000.0-2.0,A._timeout);A.timeout_timer.start()\n\tdef
+          _stop_timer(A):\n\t\tif A.timeout_timer.is_alive():A.timeout_timer.cancel()\nimport
+          boto3\nclass S(R):\n\tdef delete(E,event,context):A=K.utcnow().replace(tzinfo=L.utc);B=os.environ[J];C=context.invoked_function_arn.split(':')[4];D=T(A,C);U().publish(TopicArn=B,Message=D,Subject='MON
+          Monitoring Canary Heartbeat')\ndef T(timestamp,account_id):A=os.environ[J];return
+          B.dumps({'Time':timestamp.replace(microsecond=0).isoformat(),'Source':'mon.monitoring.canary','Type':'Termination','AccountId':account_id,'TopicArn':A})\n@M(maxsize=1)\ndef
+          U():return boto3.client('sns')\nhandler=S()"
+      Role:
+        Fn::GetAtt:
+        - MONMonitoringStackTerminationRole
+        - Arn
+      Environment:
+        Variables:
+          TOPIC_ARN:
+            Fn::GetAtt: MMSTopic.TopicArn
+      FunctionName: MONMonitoringStackTermination
+      Handler: index.handler
+      MemorySize: 128
+      ReservedConcurrentExecutions: 2
+      Runtime: python3.7
+      Tags:
+      - Key: lambda:createdBy
+        Value: SAM
+      Timeout: 180
+  MONIAMRoleAgeEmitterInvoke:
+    Type: AWS::Events::Rule
+    Properties:
+      ScheduleExpression: rate(12 hours)
+      Targets:
+      - Arn:
+          Fn::GetAtt:
+          - MONIAMRoleAgeEmitter
+          - Arn
+        Id: MONIAMRoleAgeEmitterInvokeLambdaTarget
+  MONIAMRoleAgeEmitterInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName:
+        Ref: MONIAMRoleAgeEmitter
+      Principal: events.amazonaws.com
+      SourceArn:
+        Fn::GetAtt:
+        - MONIAMRoleAgeEmitterInvoke
+        - Arn
+  MONIAMRoleAgeEmitterLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: "/aws/lambda/MONIAMRoleAgeEmitter"
+      RetentionInDays: 731
+  MONIAMRoleMonitorForOnboardingRole:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      EvaluationPeriods: 1
+      ActionsEnabled: true
+      AlarmActions:
+      - Fn::GetAtt: MMSTopic.TopicArn
+      AlarmName: MONIAMRoleMonitorForOnboardingRole
+      DatapointsToAlarm: 1
+      Dimensions:
+      - Name: Role Name
+        Value: aws_managedservices_onboarding_role
+      InsufficientDataActions:
+      - Fn::GetAtt: MMSTopic.TopicArn
+      MetricName: IAM Role Age
+      Namespace: MON/Monitoring
+      OKActions:
+      - Fn::GetAtt: MMSTopic.TopicArn
+      Period: 43200
+      Statistic: Maximum
+      Threshold: 1036800
+      TreatMissingData: notBreaching
+  MONMonitoringCanaryRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+        - Action:
+          - sts:AssumeRole
+          Effect: Allow
+          Principal:
+            Service:
+            - lambda.amazonaws.com
+        Version: '2012-10-17'
+      ManagedPolicyArns:
+      - arn:aws:iam::aws:policy/AWSXrayWriteOnlyAccess
+      Policies:
+      - PolicyDocument:
+          Id: Allow monitoring canary to perform required actions
+          Statement:
+          - Action:
+            - sns:Publish
+            Effect: Allow
+            Resource:
+            - Fn::GetAtt:
+              - MMSTopic
+              - TopicArn
+            Sid: AllowSnsPublish
+          - Action:
+            - cloudwatch:PutMetricData
+            Effect: Allow
+            Resource:
+            - "*"
+            Sid: AllowEmitMetrics
+          Version: '2012-10-17'
+        PolicyName: MONMonitoringCanaryRolePolicy0
+      - PolicyDocument:
+          Statement:
+          - Action:
+            - logs:CreateLogGroup
+            - logs:CreateLogStream
+            - logs:PutLogEvents
+            Effect: Allow
+            Resource:
+              Fn::Sub: arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/MONMonitoringCanary:*
+          Version: '2012-10-17'
+        PolicyName: MONLambdaLogsPolicy
+      RoleName: mon_monitoring_canary
+      Tags:
+      - Key: lambda:createdBy
+        Value: SAM
+  MONMonitoringCanary:
+    Type: AWS::Lambda::Function
+    Properties:
+      Code:
+        ZipFile: "import boto3,json as B,logging as C,os\nfrom botocore.exceptions
+          import ClientError as H\nfrom datetime import datetime as E,timedelta as
+          D,timezone as F\nfrom functools import lru_cache as G\nfrom typing import
+          Dict\nA=C.getLogger()\nA.setLevel(C.INFO)\nI=D(minutes=5)\ndef handler(event,context):\n\tG=event;C=E.utcnow().replace(tzinfo=F.utc)\n\tif
+          J(G,C):A.warning(f\"Discarding event because its too old. Event:{B.dumps(G)}\");return\n\tD=os.environ['TOPIC_ARN'];I=context.invoked_function_arn.split(':')[4];M=K(C,I,D)\n\ttry:N=L().publish(TopicArn=D,Message=M,Subject='MON
+          Monitoring Canary Heartbeat');A.info(f\"Message {N['MessageId']} published
+          to {D} at {C.isoformat()}.\")\n\texcept H as O:A.exception('Unable to publish
+          heartbeat message to SNS.')\ndef J(event,now):\n\tC=event;D=C.get('time','')\n\tif
+          D:\n\t\ttry:G=E.strptime(D,'%Y-%m-%dT%H:%M:%SZ').replace(tzinfo=F.utc);return
+          G<now-I\n\t\texcept ValueError:pass\n\tA.error(f\"Unable to parse time from
+          event:{B.dumps(C)}\");return False\ndef K(timestamp,account_id,topic_arn):return
+          B.dumps({'Time':timestamp.replace(microsecond=0).isoformat(),'Source':'mon.monitoring.canary','Type':'Heartbeat','AccountId':account_id,'TopicArn':topic_arn})\n@G(maxsize=1)\ndef
+          L():return boto3.client('sns')"
+      Role:
+        Fn::GetAtt:
+        - MONMonitoringCanaryRole
+        - Arn
+      Environment:
+        Variables:
+          TOPIC_ARN:
+            Fn::GetAtt: MMSTopic.TopicArn
+      FunctionName: MONMonitoringCanary
+      Handler: index.handler
+      MemorySize: 128
+      ReservedConcurrentExecutions: 2
+      Runtime: python3.7
+      Tags:
+      - Key: lambda:createdBy
+        Value: SAM
+      Timeout: 60
+      TracingConfig:
+        Mode: Active
+    DependsOn:
+    - MONMonitoringStackTermination
+  MONMonitoringCanaryInvoke:
+    Type: AWS::Events::Rule
+    Properties:
+      ScheduleExpression: rate(1 minute)
+      Targets:
+      - Arn:
+          Fn::GetAtt:
+          - MONMonitoringCanary
+          - Arn
+        Id: MONMonitoringCanaryInvokeLambdaTarget
+  MONMonitoringCanaryInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName:
+        Ref: MONMonitoringCanary
+      Principal: events.amazonaws.com
+      SourceArn:
+        Fn::GetAtt:
+        - MONMonitoringCanaryInvoke
+        - Arn
+  MONMonitoringCanaryLogRetentionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+        - Action:
+          - sts:AssumeRole
+          Effect: Allow
+          Principal:
+            Service:
+            - lambda.amazonaws.com
+        Version: '2012-10-17'
+      ManagedPolicyArns: []
+      Policies:
+      - PolicyDocument:
+          Statement:
+          - Action: logs:PutRetentionPolicy
+            Effect: Allow
+            Resource:
+              Fn::Sub: arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/${MONMonitoringCanary}:*
+          Version: '2012-10-17'
+        PolicyName: MONMonitoringCanaryLogRetentionRolePolicy0
+      - PolicyDocument:
+          Statement:
+          - Action:
+            - logs:CreateLogGroup
+            - logs:CreateLogStream
+            - logs:PutLogEvents
+            Effect: Allow
+            Resource:
+              Fn::Sub: arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/MONMonitoringCanaryLogRetention:*
+          Version: '2012-10-17'
+        PolicyName: MONLambdaLogsPolicy
+      RoleName: mon_monitoring_canary_log_retention
+      Tags:
+      - Key: lambda:createdBy
+        Value: SAM
+  MONMonitoringCanaryLogRetention:
+    Type: AWS::Lambda::Function
+    Properties:
+      Code:
+        ZipFile: "J=False\nG='Reason'\nI='Data'\nH=Exception\nE='PhysicalResourceId'\nD='Status'\nA=None\nB=True\nimport
+          json,logging as F,threading as K,typing\nfrom urllib3 import Retry,PoolManager
+          as L\nC=F.getLogger(__name__)\nC.setLevel(F.INFO)\nM='SUCCESS'\nN='FAILED'\nclass
+          O:\n\tdef success(A,data=A,reason=A,physical_resource_id=A):\n\t\tC=physical_resource_id;B=reason;A.response[D]=M\n\t\tif
+          data:A.response[I]=data\n\t\tif B:A.response[G]=B\n\t\tif C:A.response[E]=C\n\tdef
+          failed(A,reason):A.response[D]=N;A.response[G]=reason\n\tdef __call__(A,event,context):\n\t\tM='RequestId';L='StackId';K=context;G='LogicalResourceId';B=event;C.info(f\"Received:{B}\");F=B['RequestType']\n\t\tif
+          F not in['Create','Update','Delete']:raise ValueError(f\"'{F}' invalid RequestType\")\n\t\tA.response_attempted=J;A.event=B;A.response={L:B[L],M:B[M],G:B[G],E:B.get(E,B[G]),I:{}};A._start_timer(K)\n\t\ttry:N=getattr(A,F.lower(),A._default_success_handler);N(B,K)\n\t\texcept
+          H as O:C.exception('failed execution');A.failed(str(O))\n\t\tif D not in
+          A.response:A.success()\n\t\tA._send_response();A._stop_timer();return A.response\n\tdef
+          _default_success_handler(A,event,context):A.success()\n\tdef _send_response(A):\n\t\tif
+          A.response_attempted:return\n\t\tA.response_attempted=B;D=json.dumps(A.response);C.info(f\"Response:{D}\")\n\t\ttry:E=Retry(raise_on_status=B,backoff_factor=0.5,status=3,status_forcelist=range(400,600));L().request('PUT',A.event['ResponseURL'],headers={'Content-Type':''},body=D,retries=E);return\n\t\texcept
+          H as F:G=F\n\t\tA._stop_timer();C.exception('failed to respond');raise G\n\tdef
+          _timeout(A):B='Execution timed out';C.exception(B);A.failed(B);A._send_response();raise
+          TimeoutError()\n\tdef _start_timer(A,context):A.timeout_timer=K.Timer(context.get_remaining_time_in_millis()/1000.0-2.0,A._timeout);A.timeout_timer.start()\n\tdef
+          _stop_timer(A):\n\t\tif A.timeout_timer.is_alive():A.timeout_timer.cancel()\nimport
+          boto3\nfrom botocore.exceptions import ClientError as P\nfrom functools
+          import lru_cache as Q\nimport time\nclass R(O):\n\tdef create(A,event,context):A.update(event,context)\n\tdef
+          update(D,event,context):\n\t\tG='ResourceProperties';E=event;H=E[G]['LogGroupName'];I=int(E[G]['RetentionPeriod']);K=S();L=5;F=0;M=120;A=J\n\t\twhile
+          not A:\n\t\t\ttry:F+=1;K.put_retention_policy(logGroupName=H,retentionInDays=I);D.success();A=B\n\t\t\texcept
+          P as C:\n\t\t\t\tif C.response['Error']['Code']=='ResourceNotFoundException':\n\t\t\t\t\tif
+          F>=M:D.failed(str(C));A=B\n\t\t\t\t\telse:time.sleep(L)\n\t\t\t\telse:raise
+          C\n@Q(maxsize=1)\ndef S():return boto3.client('logs')\nhandler=R()"
+      Role:
+        Fn::GetAtt:
+        - MONMonitoringCanaryLogRetentionRole
+        - Arn
+      FunctionName: MONMonitoringCanaryLogRetention
+      Handler: index.handler
+      MemorySize: 128
+      ReservedConcurrentExecutions: 2
+      Runtime: python3.7
+      Tags:
+      - Key: lambda:createdBy
+        Value: SAM
+      Timeout: 180
+  MONMonitoringCanaryLogRetentionCustom:
+    Type: Custom::MONMonitoringCanaryLogRetention
+    Properties:
+      LogGroupName:
+        Fn::Sub: "/aws/lambda/${MONMonitoringCanary}"
+      RetentionPeriod: 180
+      ServiceToken:
+        Fn::GetAtt: MONMonitoringCanaryLogRetention.Arn
+    DependsOn:
+    - MONMonitoringCanary
+  MONMonitoringStackLambdaDLQAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      EvaluationPeriods: 1
+      ActionsEnabled: true
+      AlarmActions:
+      - Fn::GetAtt: MMSTopic.TopicArn
+      AlarmName: MONMonitoringStackLambdaDLQAlarm
+      Dimensions:
+      - Name: QueueName
+        Value:
+          Fn::GetAtt: MONMonitoringStackLambdaDLQ.QueueName
+      MetricName: ApproximateNumberOfMessagesVisible
+      Namespace: AWS/SQS
+      OKActions:
+      - Fn::GetAtt: MMSTopic.TopicArn
+      Period: 60
+      Statistic: Sum
+      Threshold: 1
+      TreatMissingData: notBreaching
+  MONMonitoringStackPeriodicLambdaDLQAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      EvaluationPeriods: 1
+      ActionsEnabled: true
+      AlarmActions:
+      - Fn::GetAtt: MMSTopic.TopicArn
+      AlarmName: MONMonitoringStackPeriodicLambdaDLQAlarm
+      Dimensions:
+      - Name: QueueName
+        Value:
+          Fn::GetAtt: MONMonitoringStackPeriodicLambdaDLQ.QueueName
+      MetricName: ApproximateNumberOfMessagesVisible
+      Namespace: AWS/SQS
+      OKActions:
+      - Fn::GetAtt: MMSTopic.TopicArn
+      Period: 60
+      Statistic: Sum
+      Threshold: 10
+      TreatMissingData: notBreaching
+  MONMonitoringStackTerminationCustomResource:
+    Type: Custom::MonitoringStackTermination
+    Properties:
+      ServiceToken:
+        Fn::GetAtt: MONMonitoringStackTermination.Arn
+    DependsOn:
+    - MONMonitoringStackTermination
+    - MMSTopic
+  MONRDSEventsLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+        - Action:
+          - sts:AssumeRole
+          Effect: Allow
+          Principal:
+            Service:
+            - lambda.amazonaws.com
+        Version: '2012-10-17'
+      ManagedPolicyArns: []
+      Policies:
+      - PolicyDocument:
+          Statement:
+          - Action: sqs:SendMessage
+            Effect: Allow
+            Resource:
+              Fn::GetAtt: MONMonitoringStackLambdaDLQ.Arn
+          Version: '2012-10-17'
+        PolicyName: DeadLetterQueuePolicy
+      - PolicyDocument:
+          Id: Allow RDS Events Lambda Function
+          Statement:
+          - Action:
+            - events:PutEvents
+            Effect: Allow
+            Resource: "*"
+            Sid: AllowPutEvents
+          - Action:
+            - logs:CreateLogGroup
+            - logs:CreateLogStream
+            - logs:PutLogEvents
+            Effect: Allow
+            Resource:
+            - Fn::Sub: arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/MONRDSEvents:*
+            Sid: AllowCreateAndEmitLogs
+          - Action:
+            - sqs:SendMessage
+            Effect: Allow
+            Resource:
+              Fn::GetAtt:
+              - MONMonitoringStackLambdaDLQ
+              - Arn
+            Sid: AllowLambdaPublishToDLQ
+          Version: '2012-10-17'
+        PolicyName: MONRDSEventsLambdaRolePolicy0
+      - PolicyDocument:
+          Statement:
+          - Action:
+            - logs:CreateLogGroup
+            - logs:CreateLogStream
+            - logs:PutLogEvents
+            Effect: Allow
+            Resource:
+              Fn::Sub: arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/MONRDSEvents:*
+          Version: '2012-10-17'
+        PolicyName: MONLambdaLogsPolicy
+      RoleName: monrds_events
+      Tags:
+      - Key: lambda:createdBy
+        Value: SAM
+  MONRDSEventsLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      Code:
+        ZipFile: "import boto3,json as C,logging as B\nfrom functools import lru_cache
+          as D\nfrom typing import List\nA=B.getLogger(__name__)\nA.setLevel(B.INFO)\nE={'MalformedDetail','InvalidArgument','InvalidAccountIdException','Delayed','RedactionFailure','ValidationException'}\ndef
+          handler(event,_context):\n\tC=event;A.info(f\"Received Event: {C}\");B=F(C);A.info(f\"Events
+          transformed: {B}\")\n\tif B:\n\t\tE=J().put_events(Entries=B);D=I(E)\n\t\tif
+          D>0:raise RuntimeError(f\"EventBridge Put Event failed {D} times.\")\ndef
+          F(event):\n\tA=[]\n\tfor B in event['Records']:D=C.loads(B['Sns']['Message']);A.append(G(D))\n\treturn
+          A\ndef G(message):\n\tB='Event ID';A=message;D=dict(A.items())\n\tif B in
+          A:D.update({'Event Description Link':A[B],B:A[B].split('#')[-1]})\n\treturn{'Source':'mon','Detail':C.dumps(D),'DetailType':'Amazon
+          RDS Event','Resources':[A['Source ID']],'Time':H(A['Event Time'])}\ndef
+          H(dt):return dt.replace(' ','T')+'Z'\ndef I(responses):\n\tA=responses;B=0\n\tif
+          A['FailedEntryCount']>0:\n\t\tfor D in A['Entries']:\n\t\t\tC=D.get('ErrorCode','')\n\t\t\tif
+          C and C not in E:B+=1\n\treturn B\n@D(maxsize=1)\ndef J():return boto3.client('events')"
+      Role:
+        Fn::GetAtt:
+        - MONRDSEventsLambdaRole
+        - Arn
+      DeadLetterConfig:
+        TargetArn:
+          Fn::GetAtt: MONMonitoringStackLambdaDLQ.Arn
+      FunctionName: MONRDSEvents
+      Handler: index.handler
+      MemorySize: 128
+      ReservedConcurrentExecutions: 2
+      Runtime: python3.7
+      Tags:
+      - Key: lambda:createdBy
+        Value: SAM
+      Timeout: 60
+  MMSRDSEventsSNSTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: MON-MMS-RDS-Events
+  MONRDSEventsLambdaSNSEvent:
+    Type: AWS::SNS::Subscription
+    Properties:
+      Protocol: lambda
+      TopicArn:
+        Ref: MMSRDSEventsSNSTopic
+      Endpoint:
+        Fn::GetAtt:
+        - MONRDSEventsLambda
+        - Arn
+  MONRDSEventsLambdaSNSEventPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName:
+        Ref: MONRDSEventsLambda
+      Principal: sns.amazonaws.com
+      SourceArn:
+        Ref: MMSRDSEventsSNSTopic
+  MONRedshiftAlarmsCheckerLambdaFunctionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+        - Action:
+          - sts:AssumeRole
+          Effect: Allow
+          Principal:
+            Service:
+            - lambda.amazonaws.com
+        Version: '2012-10-17'
+      ManagedPolicyArns: []
+      Policies:
+      - PolicyDocument:
+          Statement:
+          - Action: sqs:SendMessage
+            Effect: Allow
+            Resource:
+              Fn::GetAtt: MONMonitoringStackLambdaDLQ.Arn
+          Version: '2012-10-17'
+        PolicyName: DeadLetterQueuePolicy
+      - PolicyDocument:
+          Id: Allow Redshift Alarms Lambda Function
+          Statement:
+          - Action:
+            - cloudwatch:DeleteAlarms
+            - cloudwatch:PutMetricAlarm
+            - cloudwatch:PutCompositeAlarm
+            Effect: Allow
+            Resource:
+            - Fn::Sub: arn:${AWS::Partition}:cloudwatch:${AWS::Region}:${AWS::AccountId}:alarm:*
+            Sid: AllowCreateDeleteAlarms
+          - Action:
+            - redshift:DescribeClusters
+            Effect: Allow
+            Resource:
+            - Fn::Sub: arn:${AWS::Partition}:redshift:${AWS::Region}:${AWS::AccountId}:cluster:*
+            Sid: AllowListCluster
+          - Action:
+            - cloudwatch:PutMetricData
+            Effect: Allow
+            Resource:
+            - "*"
+            Sid: AllowEmitMetrics
+          - Action:
+            - logs:CreateLogGroup
+            - logs:CreateLogStream
+            - logs:PutLogEvents
+            Effect: Allow
+            Resource:
+            - Fn::Sub: arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/MONRedshiftAlarms:*
+            Sid: AllowCreateAndEmitLogs
+          - Action:
+            - sqs:SendMessage
+            Effect: Allow
+            Resource:
+              Fn::GetAtt:
+              - MONMonitoringStackLambdaDLQ
+              - Arn
+            Sid: AllowLambdaPublishToDLQ
+          Version: '2012-10-17'
+        PolicyName: MONRedshiftAlarmsCheckerLambdaFunctionRolePolicy0
+      - PolicyDocument:
+          Statement:
+          - Action:
+            - logs:CreateLogGroup
+            - logs:CreateLogStream
+            - logs:PutLogEvents
+            Effect: Allow
+            Resource:
+              Fn::Sub: arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/MONRedshiftAlarmsChecker:*
+          Version: '2012-10-17'
+        PolicyName: MONLambdaLogsPolicy
+      RoleName: mon_redshift_alarms_checker
+  MONRedshiftAlarmsCheckerLambdaFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Code:
+        ZipFile: "P='Reason'\nO='Data'\nN=Exception\nF='PhysicalResourceId'\nE='Status'\nD=None\nimport
+          os,boto3 as G\nfrom functools import lru_cache as H\nfrom botocore.config
+          import Config as Q\nimport json as I,logging as A,threading as R,typing\nfrom
+          urllib3 import Retry,PoolManager as S\nB=A.getLogger(__name__)\nB.setLevel(A.INFO)\nT='SUCCESS'\nU='FAILED'\nclass
+          V:\n\tdef success(A,data=D,reason=D,physical_resource_id=D):\n\t\tC=physical_resource_id;B=reason;A.response[E]=T\n\t\tif
+          data:A.response[O]=data\n\t\tif B:A.response[P]=B\n\t\tif C:A.response[F]=C\n\tdef
+          failed(A,reason):A.response[E]=U;A.response[P]=reason\n\tdef __call__(A,event,context):\n\t\tJ='RequestId';I='StackId';H=context;G='LogicalResourceId';C=event;B.info(f\"Received:{C}\");D=C['RequestType']\n\t\tif
+          D not in['Create','Update','Delete']:raise ValueError(f\"'{D}' invalid RequestType\")\n\t\tA.response_attempted=False;A.event=C;A.response={I:C[I],J:C[J],G:C[G],F:C.get(F,C[G]),O:{}};A._start_timer(H)\n\t\ttry:K=getattr(A,D.lower(),A._default_success_handler);K(C,H)\n\t\texcept
+          N as L:B.exception('failed execution');A.failed(str(L))\n\t\tif E not in
+          A.response:A.success()\n\t\tA._send_response();A._stop_timer();return A.response\n\tdef
+          _default_success_handler(A,event,context):A.success()\n\tdef _send_response(A):\n\t\tif
+          A.response_attempted:return\n\t\tA.response_attempted=True;C=I.dumps(A.response);B.info(f\"Response:{C}\")\n\t\ttry:D=Retry(raise_on_status=True,backoff_factor=0.5,status=3,status_forcelist=range(400,600));S().request('PUT',A.event['ResponseURL'],headers={'Content-Type':''},body=C,retries=D);return\n\t\texcept
+          N as E:F=E\n\t\tA._stop_timer();B.exception('failed to respond');raise F\n\tdef
+          _timeout(A):C='Execution timed out';B.exception(C);A.failed(C);A._send_response();raise
+          TimeoutError()\n\tdef _start_timer(A,context):A.timeout_timer=R.Timer(context.get_remaining_time_in_millis()/1000.0-2.0,A._timeout);A.timeout_timer.start()\n\tdef
+          _stop_timer(A):\n\t\tif A.timeout_timer.is_alive():A.timeout_timer.cancel()\nfrom
+          typing import List,Dict\nB=A.getLogger(__name__)\nB.setLevel(A.INFO)\nJ=Q(retries={'max_attempts':10,'mode':'standard'})\ndef
+          K(alarms):\n\tfor A in alarms:\n\t\tif'AlarmRule'not in A:C().put_metric_alarm(**A)\n\t\telse:C().put_composite_alarm(**A)\n\t\tB.info(f\"Alarm:
+          {A} created successfully.\")\ndef L(alarms):\n\tfor D in alarms:A=D['AlarmName'];C().delete_alarms(AlarmNames=[A]);B.info(f\"Alarm:
+          {A} deleted successfully.\")\n@H(maxsize=1)\ndef C(config=J):return G.client('cloudwatch',config=config)\nW='${Redshift::ClusterIdentifier}'\nX='${MMS-Topic}'\ndef
+          Y(template,cluster_id,mms_topic_arn):A,B=M(template,cluster_id,mms_topic_arn);K(B);K(A)\ndef
+          b(template,cluster_id,mms_topic_arn):A,B=M(template,cluster_id,mms_topic_arn);L(A);L(B)\ndef
+          M(template,cluster_id,mms_topic_arn):B=template.replace(W,cluster_id).replace(X,mms_topic_arn);A=I.loads(B);C=A['MetricAlarms'];D=A['CompositeAlarms'];return
+          D,C\nclass Z(V):\n\tdef create(F,event,context):\n\t\tA=os.environ['MMS_TOPIC_ARN'];B=os.environ['ALARMS_TEMPLATE'];C=a().get_paginator('describe_clusters').paginate();D=[B['ClusterIdentifier']for
+          A in C for B in A['Clusters']]\n\t\tfor E in D:Y(B,E,A)\n@H(maxsize=1)\ndef
+          a(config=J):return G.client('redshift',config=config)\nhandler=Z()"
+      Role:
+        Fn::GetAtt:
+        - MONRedshiftAlarmsCheckerLambdaFunctionRole
+        - Arn
+      DeadLetterConfig:
+        TargetArn:
+          Fn::GetAtt: MONMonitoringStackLambdaDLQ.Arn
+      Environment:
+        Variables:
+          ALARMS_TEMPLATE:
+            Fn::FindInMap:
+            - AlarmMap
+            - ManagedAlarms
+            - RedShiftAlarmsTemplate
+          MMS_TOPIC_ARN:
+            Fn::GetAtt: MMSTopic.TopicArn
+      FunctionName: MONRedshiftAlarmsChecker
+      Handler: index.handler
+      MemorySize: 256
+      ReservedConcurrentExecutions: 2
+      Runtime: python3.7
+      Timeout: 60
+  MONRedshiftAlarmsCheckerCustomResource:
+    Type: Custom::RedshiftAlarmsChecker
+    Properties:
+      ServiceToken:
+        Fn::GetAtt: MONRedshiftAlarmsCheckerLambdaFunction.Arn
+    DependsOn:
+    - MMSTopic
+  MONRedshiftAlarmsLambdaFunctionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+        - Action:
+          - sts:AssumeRole
+          Effect: Allow
+          Principal:
+            Service:
+            - lambda.amazonaws.com
+        Version: '2012-10-17'
+      ManagedPolicyArns:
+      - arn:aws:iam::aws:policy/AWSXrayWriteOnlyAccess
+      Policies:
+      - PolicyDocument:
+          Statement:
+          - Action: sqs:SendMessage
+            Effect: Allow
+            Resource:
+              Fn::GetAtt: MONMonitoringStackLambdaDLQ.Arn
+          Version: '2012-10-17'
+        PolicyName: DeadLetterQueuePolicy
+      - PolicyDocument:
+          Id: Allow Redshift Alarms Lambda Function
+          Statement:
+          - Action:
+            - cloudwatch:DeleteAlarms
+            - cloudwatch:PutMetricAlarm
+            - cloudwatch:PutCompositeAlarm
+            Effect: Allow
+            Resource:
+            - Fn::Sub: arn:${AWS::Partition}:cloudwatch:${AWS::Region}:${AWS::AccountId}:alarm:*
+            Sid: AllowCreateDeleteAlarms
+          - Action:
+            - cloudwatch:PutMetricData
+            Effect: Allow
+            Resource:
+            - "*"
+            Sid: AllowEmitMetrics
+          - Action:
+            - logs:CreateLogGroup
+            - logs:CreateLogStream
+            - logs:PutLogEvents
+            Effect: Allow
+            Resource:
+            - Fn::Sub: arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/MONRedshiftAlarms:*
+            Sid: AllowCreateAndEmitLogs
+          - Action:
+            - sqs:SendMessage
+            Effect: Allow
+            Resource:
+              Fn::GetAtt:
+              - MONMonitoringStackLambdaDLQ
+              - Arn
+            Sid: AllowLambdaPublishToDLQ
+          Version: '2012-10-17'
+        PolicyName: MONRedshiftAlarmsLambdaFunctionRolePolicy0
+      - PolicyDocument:
+          Statement:
+          - Action:
+            - logs:CreateLogGroup
+            - logs:CreateLogStream
+            - logs:PutLogEvents
+            Effect: Allow
+            Resource:
+              Fn::Sub: arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/MONRedshiftAlarms:*
+          Version: '2012-10-17'
+        PolicyName: MONLambdaLogsPolicy
+      RoleName: mon_redshift_alarms
+      Tags:
+      - Key: lambda:createdBy
+        Value: SAM
+    Condition: IsStandardOnly
+  MONRedshiftAlarmsLambdaFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Code:
+        ZipFile: "D=ValueError\nimport os,logging as B\nfrom typing import Tuple\nimport
+          json,typing\nfrom functools import lru_cache as H\nimport boto3\nfrom botocore.config
+          import Config as I\nA=B.getLogger(__name__)\nA.setLevel(B.INFO)\nJ=I(retries={'max_attempts':10,'mode':'standard'})\ndef
+          E(alarms):\n\tfor B in alarms:\n\t\tif'AlarmRule'not in B:C().put_metric_alarm(**B)\n\t\telse:C().put_composite_alarm(**B)\n\t\tA.info(f\"Alarm:
+          {B} created successfully.\")\ndef F(alarms):\n\tfor D in alarms:B=D['AlarmName'];C().delete_alarms(AlarmNames=[B]);A.info(f\"Alarm:
+          {B} deleted successfully.\")\n@H(maxsize=1)\ndef C(config=J):return boto3.client('cloudwatch',config=config)\nK='${Redshift::ClusterIdentifier}'\nL='${MMS-Topic}'\ndef
+          M(template,cluster_id,mms_topic_arn):A,B=G(template,cluster_id,mms_topic_arn);E(B);E(A)\ndef
+          N(template,cluster_id,mms_topic_arn):A,B=G(template,cluster_id,mms_topic_arn);F(A);F(B)\ndef
+          G(template,cluster_id,mms_topic_arn):B=template.replace(K,cluster_id).replace(L,mms_topic_arn);A=json.loads(B);C=A['MetricAlarms'];D=A['CompositeAlarms'];return
+          D,C\nA=B.getLogger(__name__)\nA.setLevel(B.INFO)\ndef handler(event,_context):\n\tC=event;A.info(f\"Received
+          Event: {C}\");E,B=O(C);F=os.environ['MMS_TOPIC_ARN'];G=os.environ['ALARMS_TEMPLATE']\n\tif
+          B=='CreateCluster':M(G,E,F)\n\telif B=='DeleteCluster':N(G,E,F)\n\telse:raise
+          D(f\"'{B}' event is not supported.\")\ndef O(event):\n\tE='detail';A=event;B=A[E]['requestParameters']['clusterIdentifier']\n\tif
+          B is None:raise D('Cluster Id is null.')\n\tC=A[E]['eventName']\n\tif C
+          is None:raise D('Event Name is null.')\n\treturn B,C"
+      Role:
+        Fn::GetAtt:
+        - MONRedshiftAlarmsLambdaFunctionRole
+        - Arn
+      DeadLetterConfig:
+        TargetArn:
+          Fn::GetAtt: MONMonitoringStackLambdaDLQ.Arn
+      Environment:
+        Variables:
+          ALARMS_TEMPLATE:
+            Fn::FindInMap:
+            - AlarmMap
+            - ManagedAlarms
+            - RedShiftAlarmsTemplate
+          MMS_TOPIC_ARN:
+            Fn::GetAtt: MMSTopic.TopicArn
+      FunctionName: MONRedshiftAlarms
+      Handler: index.handler
+      MemorySize: 256
+      ReservedConcurrentExecutions: 2
+      Runtime: python3.7
+      Timeout: 60
+      TracingConfig:
+        Mode: Active
+    Condition: IsStandardOnly
+  MONRedshiftAlarmsLambdaFunctionClusterEvent:
+    Type: AWS::Events::Rule
+    Properties:
+      EventPattern:
+        detail:
+          errorCode:
+          - exists: false
+          - anything-but:
+            - AccessDenied
+          eventName:
+          - CreateCluster
+          - DeleteCluster
+          eventSource:
+          - Fn::Sub: redshift.${AWS::URLSuffix}
+        detail-type:
+        - AWS API Call via CloudTrail
+        source:
+        - aws.redshift
+      Targets:
+      - Arn:
+          Fn::GetAtt:
+          - MONRedshiftAlarmsLambdaFunction
+          - Arn
+        Id: MONRedshiftAlarmsLambdaFunctionClusterEventLambdaTarget
+    Condition: IsStandardOnly
+  MONRedshiftAlarmsLambdaFunctionClusterEventPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName:
+        Ref: MONRedshiftAlarmsLambdaFunction
+      Principal: events.amazonaws.com
+      SourceArn:
+        Fn::GetAtt:
+        - MONRedshiftAlarmsLambdaFunctionClusterEvent
+        - Arn
+    Condition: IsStandardOnly
+  MONResourceCopInitialNotification:
+    Type: AWS::Events::Rule
+    Properties:
+      Description: The presence of this rule is required when MONResourceCop initially
+        detects a resource created by MON engineers in the customer account and creates
+        a corresponding event
+      EventPattern:
+        detail:
+          event-id:
+          - MON Team Created Resource Detected
+        detail-type:
+        - Detected Resource created by MON Team in customer account
+        source:
+        - mon
+      Targets:
+      - Arn:
+          Fn::GetAtt: MMSTopic.TopicArn
+        Id: MMS-Topic
+  MONResourceCopReconciliation:
+    Type: AWS::Events::Rule
+    Properties:
+      Description: The presence of this rule is required when MONResourceCop detects
+        that a resource still exists within a customer account after 72 hours of the
+        first notification sent
+      EventPattern:
+        detail:
+          event-id:
+          - Reconciling MON Team Created Resource
+        detail-type:
+        - Reconciling Resource created by MON Team in customer account
+        source:
+        - mon
+      Targets:
+      - Arn:
+          Fn::GetAtt: MMSTopic.TopicArn
+        Id: MMS-Topic
+  AWSConfigEvents:
+    Type: AWS::Events::Rule
+    Properties:
+      Description: AWS Config Events
+      EventPattern:
+        detail:
+          requestParameters:
+            evaluations:
+              complianceType:
+              - NON_COMPLIANT
+        source:
+        - aws.config
+      Targets:
+      - Arn:
+          Fn::GetAtt: MMSTopic.TopicArn
+        Id: MMS-Topic
+  AWSHealthEvents:
+    Type: AWS::Events::Rule
+    Properties:
+      Description: AWS Health Events
+      EventPattern:
+        source:
+        - aws.health
+      Targets:
+      - Arn:
+          Fn::GetAtt: MMSTopic.TopicArn
+        Id: MMS-Topic
+  AmazonGuardDutyEvents:
+    Type: AWS::Events::Rule
+    Properties:
+      Description: Amazon GuardDuty Events
+      EventPattern:
+        detail-type:
+        - GuardDuty Finding
+        source:
+        - aws.guardduty
+      Targets:
+      - Arn:
+          Fn::GetAtt: MMSTopic.TopicArn
+        Id: MMS-Topic
+  AmazonMacieEvents:
+    Type: AWS::Events::Rule
+    Properties:
+      Description: Amazon Macie Events
+      EventPattern:
+        source:
+        - aws.macie
+      Targets:
+      - Arn:
+          Fn::GetAtt: MMSTopic.TopicArn
+        Id: MMS-Topic
+  AmazonRDSEvents:
+    Type: AWS::Events::Rule
+    Properties:
+      Description: Amazon RDS Events
+      EventPattern:
+        detail:
+          Event ID:
+          - RDS-EVENT-0007
+          - RDS-EVENT-0031
+          - RDS-EVENT-0034
+          - RDS-EVENT-0035
+          - RDS-EVENT-0036
+          - RDS-EVENT-0045
+          - RDS-EVENT-0057
+          - RDS-EVENT-0058
+          - RDS-EVENT-0065
+          - RDS-EVENT-0066
+          - RDS-EVENT-0079
+          - RDS-EVENT-0080
+          - RDS-EVENT-0081
+          - RDS-EVENT-0089
+          - RDS-EVENT-0143
+        detail-type:
+        - Amazon RDS Event
+        source:
+        - mon
+      Targets:
+      - Arn:
+          Fn::GetAtt: MMSTopic.TopicArn
+        Id: MMS-Topic
+  DirectCustomerAlertsTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      KmsMasterKeyId:
+        Ref: SNSTopicCmkAlias
+      TopicName:
+        Ref: DirectCustomerAlertsTopicName
+  DirectCustomerAlertsTopicPolicy:
+    Type: AWS::SNS::TopicPolicy
+    Properties:
+      PolicyDocument:
+        Id: DirectCustomerAlertsTopicPolicy
+        Statement:
+        - Action:
+          - SNS:GetTopicAttributes
+          - SNS:SetTopicAttributes
+          - SNS:AddPermission
+          - SNS:RemovePermission
+          - SNS:DeleteTopic
+          - SNS:Subscribe
+          - SNS:ListSubscriptionsByTopic
+          - SNS:Publish
+          - SNS:Receive
+          Condition:
+            StringEquals:
+              AWS:SourceOwner:
+                Ref: AWS::AccountId
+          Effect: Allow
+          Principal:
+            AWS: "*"
+          Resource:
+            Ref: DirectCustomerAlertsTopic
+          Sid: __default_statement_ID
+        - Action:
+          - SNS:Publish
+          Effect: Allow
+          Principal:
+            Service:
+              Fn::Sub: events.${AWS::URLSuffix}
+          Resource:
+            Ref: DirectCustomerAlertsTopic
+          Sid: AllowPublishToDirectCustomerAlertsTopic
+        Version: '2012-10-17'
+      Topics:
+      - Ref: DirectCustomerAlertsTopic
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+        - id: F18
+          reason: Condition restricts permissions to current account.
+  EC2CWAlarmCleanupLambdaFunctionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+        - Action:
+          - sts:AssumeRole
+          Effect: Allow
+          Principal:
+            Service:
+            - lambda.amazonaws.com
+        Version: '2012-10-17'
+      ManagedPolicyArns:
+      - arn:aws:iam::aws:policy/AWSXrayWriteOnlyAccess
+      Policies:
+      - PolicyDocument:
+          Statement:
+          - Action: sqs:SendMessage
+            Effect: Allow
+            Resource:
+              Fn::GetAtt: MONMonitoringStackLambdaDLQ.Arn
+          Version: '2012-10-17'
+        PolicyName: DeadLetterQueuePolicy
+      - PolicyDocument:
+          Statement:
+          - Action:
+            - cloudwatch:DescribeAlarms
+            - cloudwatch:DeleteAlarms
+            Effect: Allow
+            Resource:
+            - Fn::Sub: arn:${AWS::Partition}:cloudwatch:${AWS::Region}:${AWS::AccountId}:alarm:*
+            Sid: AllowDeleteAlarms
+          - Action:
+            - cloudwatch:PutMetricData
+            Effect: Allow
+            Resource:
+            - "*"
+            Sid: AllowEmitMetrics
+          - Action:
+            - ec2:DescribeInstances
+            Effect: Allow
+            Resource:
+            - "*"
+            Sid: AllowEc2DescribeInstances
+          - Action: sqs:SendMessage
+            Effect: Allow
+            Resource:
+              Fn::GetAtt:
+              - MONMonitoringStackLambdaDLQ
+              - Arn
+            Sid: AllowLambdaPublishToDLQ
+          Version: '2012-10-17'
+        PolicyName: EC2CWAlarmCleanupLambdaFunctionRolePolicy0
+      - PolicyDocument:
+          Statement:
+          - Action:
+            - logs:CreateLogGroup
+            - logs:CreateLogStream
+            - logs:PutLogEvents
+            Effect: Allow
+            Resource:
+              Fn::Sub: arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/MONEC2CWAlarmCleanup:*
+          Version: '2012-10-17'
+        PolicyName: MONLambdaLogsPolicy
+      RoleName: monec2_cw_alarm_cleanup
+      Tags:
+      - Key: lambda:createdBy
+        Value: SAM
+  EC2CWAlarmCleanupLambdaFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Code:
+        ZipFile: "C=len\nimport boto3,json,logging as B,os\nfrom botocore.exceptions
+          import ClientError as G\nfrom functools import lru_cache as F\nfrom typing
+          import Dict,List\nA=B.getLogger()\nA.setLevel(B.INFO)\ndef handler(event,context):C=event;A.info(f\"Received
+          event: {C}\");B=C['detail']['instance-id'];D=[A for A in J(B)if H(B,A)];I(B,D)\ndef
+          H(instance_id,alarm_name):\n\tC='INSTANCE_ID';B=alarm_name;A=instance_id;D=os.environ['NON_BASELINE_ALARMS']\n\tif
+          B.replace(A,C)in D:return True\n\tE=K()\n\tfor F in E.values():\n\t\tG=F['name'].replace(C,A)\n\t\tif
+          B==G:return True\n\treturn False\ndef I(instance_id,alarms):\n\tF=instance_id;B=alarms;H=100;I=0;J=0;A.info(f\"Preparing
+          to delete {C(B)} alarms: {B}\")\n\tfor K in range(0,C(B),H):\n\t\ttry:L=B[K:K+H];E().delete_alarms(AlarmNames=L);A.info(f\"Deleted
+          {C(B)} alarms for {F}: {B}\");I+=C(L)\n\t\texcept G:A.info(f\"Failed delete
+          alarms: {B}\");J+=1\n\tD(metric_name='Failed Deletion',instance_id=F,count=J);D(metric_name='Alarms
+          Deleted',instance_id=F,count=I)\ndef J(instance_id):F=instance_id;G=E().get_paginator('describe_alarms');H=G.paginate(AlarmNamePrefix=F);B=[B['AlarmName']for
+          A in H for B in A['MetricAlarms']];A.info(f\"Found {C(B)} alarms for {F}:
+          {B}\");D(metric_name='Total Alarm Count',instance_id=F,count=C(B));return
+          B\ndef D(metric_name,instance_id,count):\n\tH='Name';F=count;D=instance_id;C=metric_name;B='Value'\n\ttry:E().put_metric_data(Namespace='MON/Monitoring',MetricData=[{'MetricName':C,'Dimensions':[{H:'Component',B:'MONAlarmCleanup'},{H:'InstanceId',B:D}],B:F,'Unit':'Count'}])\n\texcept
+          G:A.exception(f\"Failed to put metric {C} {D} with count {F}\")\n@F(maxsize=1)\ndef
+          E():return boto3.client('cloudwatch')\n@F(maxsize=1)\ndef K():return json.loads(os.environ['ALARMS'])"
+      Role:
+        Fn::GetAtt:
+        - EC2CWAlarmCleanupLambdaFunctionRole
+        - Arn
+      DeadLetterConfig:
+        TargetArn:
+          Fn::GetAtt: MONMonitoringStackLambdaDLQ.Arn
+      Environment:
+        Variables:
+          ALARMS:
+            Fn::FindInMap:
+            - AlarmMap
+            - ManagedAlarms
+            - EC2Alarms
+          NON_BASELINE_ALARMS: |-
+            [
+                    "INSTANCE_ID: UnhealthyBastionFriendlyDNS",
+                    "INSTANCE_ID: Unmanaged by EPS",
+                    "INSTANCE_ID: BastionFriendlyDNSSecurity",]
+      FunctionName: MONEC2CWAlarmCleanup
+      Handler: index.handler
+      MemorySize: 128
+      ReservedConcurrentExecutions: 2
+      Runtime: python3.7
+      Tags:
+      - Key: lambda:createdBy
+        Value: SAM
+      Timeout: 900
+      TracingConfig:
+        Mode: Active
+  EC2CWAlarmCleanupLambdaFunctionCleanupEvent:
+    Type: AWS::Events::Rule
+    Properties:
+      EventPattern:
+        detail:
+          state:
+          - stopped
+          - terminated
+        detail-type:
+        - EC2 Instance State-change Notification
+        source:
+        - aws.ec2
+      Targets:
+      - Arn:
+          Fn::GetAtt:
+          - EC2CWAlarmCleanupLambdaFunction
+          - Arn
+        Id: EC2CWAlarmCleanupLambdaFunctionCleanupEventLambdaTarget
+  EC2CWAlarmCleanupLambdaFunctionCleanupEventPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName:
+        Ref: EC2CWAlarmCleanupLambdaFunction
+      Principal: events.amazonaws.com
+      SourceArn:
+        Fn::GetAtt:
+        - EC2CWAlarmCleanupLambdaFunctionCleanupEvent
+        - Arn
+  MMSRDSEventSubscription:
+    Type: AWS::RDS::EventSubscription
+    Properties:
+      SnsTopicArn:
+        Ref: MMSRDSEventsSNSTopic
+      Enabled: true
+  SNSTopicDLQCmk:
+    Type: AWS::KMS::Key
+    Properties:
+      KeyPolicy:
+        Id: SNSTopicDLQKmsKey
+        Statement:
+        - Action: kms:*
+          Effect: Allow
+          Principal:
+            AWS:
+              Fn::Sub: arn:${AWS::Partition}:iam::${AWS::AccountId}:root
+          Resource: "*"
+          Sid: Allow IAM user permissions
+        - Action:
+          - kms:Decrypt
+          - kms:GenerateDataKey*
+          Condition:
+            StringEquals:
+              kms:CallerAccount:
+                Ref: AWS::AccountId
+          Effect: Allow
+          Principal:
+            AWS: "*"
+          Resource: "*"
+          Sid: Allow all principals in the account to use this key
+        - Action:
+          - kms:Decrypt
+          - kms:GenerateDataKey*
+          Effect: Allow
+          Principal:
+            Service:
+            - Fn::Sub: sns.${AWS::URLSuffix}
+          Resource: "*"
+          Sid: Allow SNS
+        Version: '2012-10-17'
+      EnableKeyRotation: true
+  MMSTopicDLQ:
+    Type: AWS::SQS::Queue
+    Properties:
+      KmsMasterKeyId:
+        Fn::GetAtt: SNSTopicDLQCmk.Arn
+      MessageRetentionPeriod: 1209600
+      QueueName: mc-monitoring-mms-topic-dlq
+  MMSTopicDLQPolicy:
+    Type: AWS::SQS::QueuePolicy
+    Properties:
+      PolicyDocument:
+        Statement:
+        - Action: SQS:SendMessage
+          Condition:
+            ArnEquals:
+              aws:SourceArn:
+                Ref: MMSTopic
+          Effect: Allow
+          Principal:
+            Service: sns.amazonaws.com
+          Resource:
+            Fn::GetAtt:
+            - MMSTopicDLQ
+            - Arn
+          Sid: DLQ_Allow_From_MMS_Topic
+        Version: '2012-10-17'
+      Queues:
+      - Ref: MMSTopicDLQ
+  MMSTopicPolicy:
+    Type: AWS::SNS::TopicPolicy
+    Properties:
+      PolicyDocument:
+        Id: MMSTopicPolicy
+        Statement:
+        - Action:
+          - SNS:GetTopicAttributes
+          - SNS:SetTopicAttributes
+          - SNS:AddPermission
+          - SNS:RemovePermission
+          - SNS:DeleteTopic
+          - SNS:Subscribe
+          - SNS:ListSubscriptionsByTopic
+          - SNS:Publish
+          - SNS:Receive
+          Condition:
+            StringEquals:
+              AWS:SourceOwner:
+                Ref: AWS::AccountId
+          Effect: Allow
+          Principal:
+            AWS: "*"
+          Resource:
+            Fn::GetAtt:
+            - MMSTopic
+            - TopicArn
+          Sid: __default_statement_ID
+        - Action: SNS:Publish
+          Effect: Allow
+          Principal:
+            Service:
+              Fn::Sub: events.${AWS::URLSuffix}
+          Resource:
+            Fn::GetAtt:
+            - MMSTopic
+            - TopicArn
+          Sid: AWSEvents_CloudWatchEvent
+        - Action: SNS:Publish
+          Effect: Allow
+          Principal:
+            Service:
+              Fn::Sub: backup.${AWS::URLSuffix}
+          Resource:
+            Fn::GetAtt:
+            - MMSTopic
+            - TopicArn
+          Sid: AWSBackup_Notification
+        Version: '2012-10-17'
+      Topics:
+      - Fn::GetAtt: MMSTopic.TopicArn
+  NewAmsEc2InstanceEventSenderFunctionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+        - Action:
+          - sts:AssumeRole
+          Effect: Allow
+          Principal:
+            Service:
+              Fn::Sub: lambda.${AWS::URLSuffix}
+        Version: '2012-10-17'
+      Path: "/"
+      Policies:
+      - PolicyDocument:
+          Statement:
+          - Action:
+            - events:PutEvents
+            Effect: Allow
+            Resource:
+            - "*"
+            Sid: AllowCloudWatchEvents
+          - Action:
+            - ec2:DescribeInstances
+            Effect: Allow
+            Resource:
+            - "*"
+            Sid: AllowEc2DescribeInstances
+          Version: '2012-10-17'
+        PolicyName: NewAmsEc2InstanceEventSenderFunctionPolicy
+      - PolicyDocument:
+          Statement:
+          - Action:
+            - logs:CreateLogGroup
+            - logs:CreateLogStream
+            - logs:PutLogEvents
+            Effect: Allow
+            Resource:
+            - Fn::Sub: arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/MONNewEc2InstanceEventSender:*
+          Version: '2012-10-17'
+        PolicyName: MONLambdaLogsPolicy
+      - PolicyDocument:
+          Statement:
+          - Action: sqs:SendMessage
+            Effect: Allow
+            Resource:
+              Fn::GetAtt:
+              - MONMonitoringStackLambdaDLQ
+              - Arn
+          Version: '2012-10-17'
+        PolicyName: MONLambdaDLQPolicy
+  NewAmsEc2InstanceEventSenderFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Code:
+        ZipFile: |
+          import boto3
+          import json
+          import logging
+          from botocore.exceptions import ClientError
+
+          logger = logging.getLogger(__name__)
+          logger.setLevel(logging.INFO)
+
+          def lambda_handler(event, context):
+              instance_id = event.get('instanceId')
+              if not instance_id:
+                  logger.error('Invalid instanceId')
+                  return result('Invalid instanceId', statusCode=400)
+
+              try:
+                  ec2 = boto3.client('ec2')
+                  instances = ec2.describe_instances(InstanceIds=[instance_id])
+                  instance = instances['Reservations'][0]['Instances'][0]
+              except ClientError:
+                  logger.error('Instance not found')
+                  return result('Instance not found', statusCode=400)
+
+              region, account_id = context.invoked_function_arn.split(':')[3:5]
+              event_detail = json.dumps({
+                  'accountId': account_id,
+                  'region': region,
+                  'instanceId': instance_id,
+                  'instanceDetails': instance
+              }, default=str)
+
+              logger.info('Sending event detail: {}'.format(event_detail))
+
+              cwe = boto3.client('events')
+              response = cwe.put_events(
+                  Entries=[
+                      {
+                          'Source': 'mon',
+                          'Resources': [instance_id],
+                          'DetailType': 'New Instance',
+                          'Detail': event_detail
+                      },
+                  ]
+              )
+
+              logger.info('Response: {}'.format(response))
+
+              if response['FailedEntryCount'] > 0:
+                  raise RuntimeError('Failed to send new instance event')
+
+              return result('success')
+
+
+          def result(message, statusCode=200):
+              return {
+                  'statusCode': statusCode,
+                  'body': json.dumps(message)
+              }
+      Role:
+        Fn::GetAtt: NewAmsEc2InstanceEventSenderFunctionRole.Arn
+      DeadLetterConfig:
+        TargetArn:
+          Fn::GetAtt: MONMonitoringStackLambdaDLQ.Arn
+      FunctionName: MONNewEc2InstanceEventSender
+      Handler: index.lambda_handler
+      MemorySize: 128
+      ReservedConcurrentExecutions: 2
+      Runtime: python3.9
+      Timeout: 60
+  NewAmsEc2InstanceEvents:
+    Type: AWS::Events::Rule
+    Properties:
+      Description: New MON EC2 Instance Events
+      EventPattern:
+        detail-type:
+        - New Instance
+        source:
+        - mon
+      Targets:
+      - Arn:
+          Fn::GetAtt: MMSTopic.TopicArn
+        Id: MMS-Topic
+  SNSTopicDLQCmkAlias:
+    Type: AWS::KMS::Alias
+    Properties:
+      AliasName: alias/sns_topic_dlq_key
+      TargetKeyId:
+        Ref: SNSTopicDLQCmk
+Outputs:
+  MONDirectoryServiceEventTopicSubscriber:
+    Description: AWS Directory Service Event SNS Topic Subsriber
+    Value:
+      Fn::GetAtt: MONDirectoryServiceEventTopicSubscriber.Arn
+  EC2CWAlarmCleanupLambdaFunction:
+    Description: Lambda function to cleanup EC2 instance's CloudWatch alarms during
+      its stop/termination state.
+    Value:
+      Ref: EC2CWAlarmCleanupLambdaFunction
+    Condition: IsStandardOnly
+  MMSDirectoryServiceEventsSNSTopicName:
+    Description: MMS Directory Service Events SNS Topic Name
+    Value:
+      Fn::GetAtt: MMSDirectoryServiceEventsSNSTopic.TopicName
+  MMSTopicARN:
+    Description: The ARN of the MMS notifications topic.
+    Value:
+      Fn::GetAtt: MMSTopic.TopicArn
+  StackArn:
+    Value:
+      Ref: AWS::StackId
